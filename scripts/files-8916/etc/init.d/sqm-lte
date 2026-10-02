@@ -1,0 +1,172 @@
+#!/bin/sh /etc/rc.common
+#
+# sqm-lte - keep SQM/CAKE attached to the LTE (modem) interface and help size
+# the shaper to the real bearer rate.
+#
+# LTE bearers buffer very deeply: a single upload can push download latency to
+# hundreds of milliseconds while the router sits completely idle, because the
+# queue is inside the modem, not in the CPU. CAKE on the LTE interface fixes
+# it - but only when the shaper is set slightly BELOW the real link rate
+# (~85%). Too high and the queue moves back into the modem; too low and you
+# lose throughput.
+#
+# Usage:
+#   service sqm-lte start      # wait for the modem device, then (re)start SQM
+#   service sqm-lte measure    # sample the link for 10s - run a speedtest now
+#   service sqm-lte apply      # write 85% of the measurement into /etc/config/sqm
+#   service sqm-lte status     # show device + current shaper rates
+
+START=99
+STOP=10
+
+SECTION=lte
+RATEFILE=/etc/sqm-lte.rate
+SAMPLE=10
+
+EXTRA_COMMANDS="measure apply status"
+EXTRA_HELP="	measure	Sample the LTE link for ${SAMPLE}s - run a speedtest while it runs
+	apply	Write 85% of the last measurement into /etc/config/sqm
+	status	Show the LTE device and the rates currently configured"
+
+_iface() {
+	local ifc
+	ifc=$(uci -q get sqm.$SECTION.interface)
+	echo "${ifc:-modem}"
+}
+
+_device() {
+	local ifc dev d
+	ifc=$(_iface)
+
+	dev=$(uci -q get network.$ifc.device 2>/dev/null)
+
+	if [ -z "$dev" ] && command -v ifstatus >/dev/null 2>&1; then
+		dev=$(ifstatus "$ifc" 2>/dev/null | jsonfilter -q -e '@["l3_device"]')
+	fi
+
+	# Last resort: LTE data interfaces are named wwan* (qmi/mbim/rmnet) or
+	# usb* (older ECM/NCM setups).
+	if [ -z "$dev" ]; then
+		for d in /sys/class/net/*; do
+			case "${d##*/}" in
+				wwan*|rmnet*|usb*) dev=${d##*/}; break ;;
+			esac
+		done
+	fi
+
+	echo "$dev"
+}
+
+_wait_dev() {
+	local dev i
+	i=0
+	while [ "$i" -lt 30 ]; do
+		dev=$(_device)
+		if [ -n "$dev" ] && [ -d "/sys/class/net/$dev" ]; then
+			echo "$dev"
+			return 0
+		fi
+		i=$((i + 1))
+		sleep 2
+	done
+	return 1
+}
+
+_kbits() {
+	# $1 = before, $2 = after, $3 = seconds
+	awk -v a="$1" -v b="$2" -v s="$3" 'BEGIN{
+		d = b - a; if (d < 0) d += 4294967296;
+		v = int((d * 8) / (s * 1000));
+		printf "%d", v;
+	}'
+}
+
+start() {
+	local dev
+	dev=$(_wait_dev) || {
+		logger -t sqm-lte "no LTE interface found, SQM left alone"
+		return 1
+	}
+
+	logger -t sqm-lte "LTE device=$dev dl=$(uci -q get sqm.$SECTION.download) kbit ul=$(uci -q get sqm.$SECTION.upload) kbit"
+
+	# LTE advertises MTU 1500 but the bearer adds encapsulation. Without
+	# MSS clamping some TCP sessions black-hole and just hang.
+	iptables -t mangle -C FORWARD -o "$dev" -p tcp --tcp-flags SYN,RST SYN \
+		-j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || \
+	iptables -t mangle -A FORWARD -o "$dev" -p tcp --tcp-flags SYN,RST SYN \
+		-j TCPMSS --clamp-mss-to-pmtu 2>/dev/null
+
+	if [ -x /etc/init.d/sqm ]; then
+		/etc/init.d/sqm restart
+	else
+		logger -t sqm-lte "sqm-scripts not installed - install sqm-scripts + kmod-sched-cake"
+		return 1
+	fi
+}
+
+stop() {
+	[ -x /etc/init.d/sqm ] && /etc/init.d/sqm stop
+	return 0
+}
+
+restart() {
+	stop
+	start
+}
+
+measure() {
+	local dev rx0 tx0 rx1 tx1 dl ul
+	dev=$(_device)
+	[ -d "/sys/class/net/$dev" ] || {
+		echo "LTE interface not up yet ($dev)"
+		return 1
+	}
+
+	rx0=$(cat /sys/class/net/$dev/statistics/rx_bytes)
+	tx0=$(cat /sys/class/net/$dev/statistics/tx_bytes)
+
+	echo "Sampling $dev for ${SAMPLE}s - start a speedtest NOW..."
+	sleep "$SAMPLE"
+
+	rx1=$(cat /sys/class/net/$dev/statistics/rx_bytes)
+	tx1=$(cat /sys/class/net/$dev/statistics/tx_bytes)
+
+	dl=$(_kbits "$rx0" "$rx1" "$SAMPLE")
+	ul=$(_kbits "$tx0" "$tx1" "$SAMPLE")
+
+	echo "measured     : download ${dl} kbit/s   upload ${ul} kbit/s"
+	echo "recommended  : download $((dl * 85 / 100)) kbit/s   upload $((ul * 85 / 100)) kbit/s"
+	echo "$dl $ul" > "$RATEFILE"
+}
+
+apply() {
+	local dl ul
+	[ -f "$RATEFILE" ] || {
+		echo "run 'service sqm-lte measure' first"
+		return 1
+	}
+
+	read -r dl ul < "$RATEFILE"
+	dl=$((dl * 85 / 100))
+	ul=$((ul * 85 / 100))
+
+	[ "$dl" -lt 500 ] && dl=500
+	[ "$ul" -lt 200 ] && ul=200
+
+	uci set sqm.$SECTION.download="$dl"
+	uci set sqm.$SECTION.upload="$ul"
+	uci commit sqm
+
+	echo "sqm: download=${dl} kbit/s upload=${ul} kbit/s"
+	[ -x /etc/init.d/sqm ] && /etc/init.d/sqm restart
+}
+
+status() {
+	echo "interface : $(_iface)"
+	echo "device    : $(_device)"
+	echo "download  : $(uci -q get sqm.$SECTION.download) kbit/s"
+	echo "upload    : $(uci -q get sqm.$SECTION.upload) kbit/s"
+	echo "enabled   : $(uci -q get sqm.$SECTION.enabled)"
+	[ -f "$RATEFILE" ] && echo "last meas : $(cat "$RATEFILE") (dl ul, kbit/s)"
+}

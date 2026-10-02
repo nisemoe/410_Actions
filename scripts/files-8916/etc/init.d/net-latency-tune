@@ -1,0 +1,146 @@
+#!/bin/sh /etc/rc.common
+#
+# net-latency-tune - latency/throughput tuning for MSM8916 4G modem sticks
+# (xinxun,wf2 and friends).
+#
+# Why this exists: on these sticks the network feels laggy while "top" shows
+# an idle box. That is not a contradiction - the bottleneck is *latency*, not
+# compute. Four things add latency without ever showing up as CPU load:
+#
+#   1. deep CPU idle (cluster power-down costs ~2 ms to wake)
+#   2. the 128 MB swapfile on /overlay (a swap-in is blocking I/O, the task
+#      sleeps in D state - no CPU accounted)
+#   3. every interrupt and all softirq work pinned on CPU0
+#   4. LTE PMTU/MSS mismatch -> whole TCP connections stall
+#
+# This script handles the parts that cannot be expressed in the device tree.
+# The idle-state policy itself lives in msm8916-xinxun-wf2.dts
+# (&CLUSTER_PD / &CPU_SLEEP_0).
+
+START=97
+STOP=01
+
+# Required maximum C-state exit latency in microseconds.
+# 200 = allow core power collapse (150 us) but refuse the 500 us / 2000 us
+# cluster states. Use 0 to forbid idle states entirely (max performance,
+# noticeably warmer).
+LATENCY_USEC=200
+
+# Floor for cpufreq. 200/400 MHz are far too slow to drain a packet burst,
+# and the ramp-up time is pure added latency. 800 MHz is a good compromise;
+# lower it to 400000 to save power on battery.
+MIN_FREQ=800000
+
+# vm.swappiness. The stock /etc/init.d/swapfile puts 128 MB of swap on
+# /overlay. Default swappiness (60) lets the kernel push out pages that the
+# network stack then faults straight back in - every fault is a blocking
+# flash read. Keep swap as an emergency buffer only.
+SWAPPINESS=1
+
+_start_latency() {
+	[ -c /dev/cpu_dma_latency ] || return 0
+
+	# The PM QoS request lives only as long as the fd is open, so hold it
+	# in a background subshell for the lifetime of the box.
+	(
+		exec 3>/dev/cpu_dma_latency
+		echo "$LATENCY_USEC" >&3
+		while :; do sleep 3600; done
+	) &
+	echo $! > /var/run/net-latency-tune.pid
+}
+
+_stop_latency() {
+	local pid
+	pid=$(cat /var/run/net-latency-tune.pid 2>/dev/null)
+	[ -n "$pid" ] && kill "$pid" 2>/dev/null
+	rm -f /var/run/net-latency-tune.pid
+}
+
+_tune_cpu() {
+	local p gov
+
+	for p in /sys/devices/system/cpu/cpufreq/policy*; do
+		[ -d "$p" ] || continue
+
+		gov=""
+		for g in schedutil ondemand performance; do
+			if grep -qw "$g" "$p/scaling_available_governors" 2>/dev/null; then
+				gov=$g
+				break
+			fi
+		done
+		[ -n "$gov" ] && echo "$gov" > "$p/scaling_governor" 2>/dev/null
+
+		[ -f "$p/scaling_min_freq" ] && \
+			echo "$MIN_FREQ" > "$p/scaling_min_freq" 2>/dev/null
+	done
+}
+
+_tune_irq() {
+	# By default every interrupt lands on CPU0, so ksoftirqd/0 becomes a
+	# single-core bottleneck: total CPU looks ~25% busy while one core is
+	# saturated. Spread the radio/modem/storage IRQs over the other cores.
+	local irq cpu=1
+
+	for irq in $(awk '/wcnss|wcn36|wlan|bam|dmux|sdhci|mmc/ {
+				gsub(/:/, "", $1); print $1 }' /proc/interrupts 2>/dev/null); do
+		[ -f "/proc/irq/$irq/smp_affinity" ] || continue
+		echo "$cpu" > "/proc/irq/$irq/smp_affinity" 2>/dev/null
+		cpu=$((cpu + 1))
+		[ "$cpu" -gt 3 ] && cpu=1
+	done
+
+	# Let the network stacks run their softirq on all four cores.
+	for q in /sys/class/net/*/queues/rx-*/rps_cpus; do
+		[ -f "$q" ] && echo f > "$q" 2>/dev/null
+	done
+}
+
+_tune_net() {
+	local dev
+
+	sysctl -w vm.swappiness="$SWAPPINESS" >/dev/null 2>&1
+
+	sysctl -w net.core.netdev_max_backlog=2000 >/dev/null 2>&1
+	sysctl -w net.ipv4.tcp_fastopen=3 >/dev/null 2>&1
+
+	if [ -d /sys/module/tcp_bbr ]; then
+		modprobe tcp_bbr 2>/dev/null
+		sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1
+	fi
+
+	# LTE links advertise 1500 but the bearer adds encapsultion overhead.
+	# Without MSS clamping some TCP sessions black-hole: the page just
+	# hangs, which reads as "the WiFi is slow".
+	for dev in $(ls /sys/class/net 2>/dev/null); do
+		case "$dev" in
+			wwan*|rmnet*|usb*)
+				iptables -t mangle -C FORWARD -o "$dev" \
+					-p tcp --tcp-flags SYN,RST SYN \
+					-j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || \
+				iptables -t mangle -A FORWARD -o "$dev" \
+					-p tcp --tcp-flags SYN,RST SYN \
+					-j TCPMSS --clamp-mss-to-pmtu 2>/dev/null
+				;;
+		esac
+	done
+}
+
+start() {
+	_start_latency
+	_tune_cpu
+	_tune_irq
+	_tune_net
+	logger -t net-latency-tune "applied (latency=${LATENCY_USEC}us min_freq=${MIN_FREQ} swappiness=${SWAPPINESS})"
+}
+
+stop() {
+	_stop_latency
+	sysctl -w vm.swappiness=60 >/dev/null 2>&1
+}
+
+restart() {
+	stop
+	start
+}
