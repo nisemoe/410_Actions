@@ -176,18 +176,38 @@ jobs:
         cd openwrt
         make defconfig V=s
 
-    - name: 确认内核版本(应为 7.3-rc5)
+    - name: 确认内核版本(必须 7.3-rc5)
       run: |
         cd openwrt
         echo "===== .config 内核选择 ====="
-        grep -E "^(CONFIG_LINUX_|CONFIG_TESTING_KERNEL)" .config || echo "❌ 没有找到内核版本选项"
+        grep -E "^(CONFIG_LINUX_|CONFIG_TESTING_KERNEL)" .config || echo "(无)"
+        echo "===== target Makefile 内核相关行 ====="
+        grep -nE "FEATURES|KERNEL_PATCHVER|KERNEL_TESTING_PATCHVER" target/linux/msm89xx/Makefile || true
         echo "===== generic/kernel-7.3 ====="
         cat target/linux/generic/kernel-7.3 2>/dev/null || echo "❌ 缺少 target/linux/generic/kernel-7.3"
         echo "===== 7.3 所需文件 ====="
         ls -l target/linux/generic/config-7.3 target/linux/msm89xx/config-7.3 2>/dev/null || true
         ls target/linux/msm89xx/patches-7.3/ 2>/dev/null || true
         echo "===== 实际解析出的内核版本 ====="
-        grep -m1 -E "^Linux-Version:" tmp/.targetinfo 2>/dev/null || echo "(tmp/.targetinfo 未生成，稍后在编译日志里确认 linux-7.3-rc5)"
+        grep -m1 -E "^Linux-Version:" tmp/.targetinfo 2>/dev/null || echo "(tmp/.targetinfo 未生成)"
+
+        # 硬校验：不满足就直接红掉，绝不静默退化成 6.18
+        if ! grep -q "^CONFIG_TESTING_KERNEL=y" .config; then
+          echo "::error::.config 没有 CONFIG_TESTING_KERNEL=y —— defconfig 把它丢了（HAS_TESTING_KERNEL 未被 select），本次会退化成 6.18"
+          exit 1
+        fi
+        if ! grep -q "^CONFIG_LINUX_7_3=y" .config; then
+          echo "::error::.config 没有 CONFIG_LINUX_7_3=y —— 本次不会是 7.3 内核"
+          exit 1
+        fi
+        if grep -q "^CONFIG_LINUX_6_18=y" .config; then
+          echo "::error::.config 仍选中 CONFIG_LINUX_6_18=y（与 7.3 互斥），请检查 target Makefile"
+          exit 1
+        fi
+        if ! grep -q "^Linux-Version: 7.3-rc5" tmp/.targetinfo 2>/dev/null; then
+          echo "::warning::tmp/.targetinfo 未解析到 7.3-rc5，请核对上面输出"
+        fi
+        echo "✅ 已确认：本次编译目标内核 = Linux 7.3-rc5"
 
     - name: 核对关键插件是否被 defconfig 丢弃
       run: |
