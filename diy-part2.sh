@@ -44,6 +44,20 @@ if [ ! -e package/luci.mk ] && [ -e feeds/luci/luci.mk ]; then
 	echo "✅ 已建 package/luci.mk -> feeds/luci/luci.mk"
 fi
 
+# mosdns 打包冲突修复
+# luci-app-mosdns 依赖 mosdns（+mosdns），二者必然同时被安装；但 luci-app-mosdns 的
+# root/etc/init.d/mosdns 与 mosdns 核心包自带的同名 init 脚本冲突，opkg 安装阶段会报
+# “trying to overwrite etc/init.d/mosdns owned by mosdns” 而构建失败。
+# 去掉 luci-app-mosdns 自带的重复 init 脚本，保留 mosdns 核心包的（功能正常、UI 仍调用它）。
+for p in \
+	feeds/small/luci-app-mosdns/root/etc/init.d/mosdns \
+	package/feeds/small/luci-app-mosdns/root/etc/init.d/mosdns; do
+	if [ -f "$p" ]; then
+		rm -f "$p"
+		echo "✅ 已移除冲突文件 $p（避免与 mosdns 核心包冲突）"
+	fi
+done
+
 # 北大源
 cp -r "$GITHUB_WORKSPACE/scripts/files-8916" "$GITHUB_WORKSPACE/openwrt/files"
 ls -R "$GITHUB_WORKSPACE/openwrt/files"
