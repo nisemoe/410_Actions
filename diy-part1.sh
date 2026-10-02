@@ -60,9 +60,20 @@ if [ ! -f target/linux/generic/kernel-7.3 ]; then
 		cp -f "$K73_SRC/generic/kernel-7.3" target/linux/generic/kernel-7.3
 		echo "✅ 已补回 target/linux/generic/kernel-7.3"
 	else
-		printf 'LINUX_VERSION-7.3 = -rc5\n' > target/linux/generic/kernel-7.3
+		printf 'LINUX_VERSION-7.3 = -rc5\nLINUX_KERNEL_HASH-7.3-rc5 = skip\n' > target/linux/generic/kernel-7.3
 		echo "⚠️ 仓库未带 generic/kernel-7.3，已按 -rc5 现场生成"
 	fi
+fi
+
+# 1b) 必须有 hash 定义：download.pl 不认 kernel-version.mk 默认的 "x"（会 die -> make download 退出码 2），
+#     只认 64 位 sha256 / 32 位 md5 / 字面量 skip。缺了就补 skip。
+if [ -f target/linux/generic/kernel-7.3 ]; then
+	if ! grep -q "^LINUX_KERNEL_HASH-7.3-rc5" target/linux/generic/kernel-7.3; then
+		printf 'LINUX_KERNEL_HASH-7.3-rc5 = skip\n' >> target/linux/generic/kernel-7.3
+		echo "⚠️ kernel-7.3 缺 LINUX_KERNEL_HASH 定义，已补 skip（否则 make download 会失败）"
+	fi
+	echo "----- target/linux/generic/kernel-7.3 生效行 -----"
+	grep -E "^(LINUX_VERSION|LINUX_KERNEL_HASH)" target/linux/generic/kernel-7.3 || true
 fi
 
 # 2) generic/config-7.3：上游不会为新内核提供，用最新的 config-x.y 复制一份。
