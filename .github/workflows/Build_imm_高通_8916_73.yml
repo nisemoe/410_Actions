@@ -283,27 +283,69 @@ jobs:
         echo -e "$(nproc) thread compile"
 
         set +e
-        make -j$(nproc)
-        BUILD_EXIT=$?
+        make -j$(nproc) 2>&1 | tee build.log
+        BUILD_EXIT=${PIPESTATUS[0]}
         set -e
 
         if [ $BUILD_EXIT -ne 0 ]; then
+          echo "::group::❌ 并行编译失败（退出码 $BUILD_EXIT）—— 错误定位"
+          echo "----- 日志最后 200 行 -----"
+          tail -n 200 build.log
+          echo "----- 关键字命中（最后 60 行）-----"
+          grep -nE "Error [0-9]|error:|ERROR:|\*\*\*|No rule to make target|No such file" build.log | tail -n 60
+          echo "::endgroup::"
+
+          # 7.3-rc5 常见坑的定向提示
+          if grep -qiE "backports|wcn36xx|mac80211|cfg80211" build.log; then
+            echo "::warning::日志出现 backports/wcn36xx：多半是 openwrt/backports v7.2 与 7.3-rc5 头文件不兼容 —— 见 KERNEL-7.3-rc5-适配说明.md 的 Plan B（改用内核内建 CONFIG_WCN36XX=m）"
+          fi
+          if grep -qiE "linux-7\.3-rc5|tar\.gz|Hash verification|checksum" build.log; then
+            echo "::warning::日志出现内核源码/下载相关报错：确认 dl/linux-7.3-rc5.tar.gz 是否下载完整（rc 包走 git.kernel.org，不走 cdn）"
+          fi
+          if grep -qiE "is not set|not available in the kernel config" build.log; then
+            echo "::warning::有 kmod 因内核配置不可用被跳过：config-7.3 是从 6.18 复制的，7.3 里改名/删除的符号会被 olddefconfig 丢掉"
+          fi
+
+          tail -n 400 build.log > build_tail.txt
+          grep -nE "Error [0-9]|error:|ERROR:|\*\*\*|No rule to make target" build.log | tail -n 200 > build_errors.txt
+
           echo "⚠️ 并行编译失败，切换到详细模式..."
           set +e
-          make -j8 V=s
-          VERBOSE_EXIT=$?
+          make -j8 V=s 2>&1 | tee build_verbose.log
+          VERBOSE_EXIT=${PIPESTATUS[0]}
           set -e
-          [ $VERBOSE_EXIT -ne 0 ] && exit $VERBOSE_EXIT
+          if [ $VERBOSE_EXIT -ne 0 ]; then
+            echo "::group::❌ 详细模式也失败（退出码 $VERBOSE_EXIT）"
+            tail -n 200 build_verbose.log
+            echo "::endgroup::"
+            tail -n 400 build_verbose.log > build_tail.txt
+            grep -nE "Error [0-9]|error:|ERROR:|\*\*\*|No rule to make target" build_verbose.log | tail -n 200 > build_errors.txt
+            echo "::error::编译失败 —— 看上面的日志尾部，或下载 build-log 工件里的 build_errors.txt"
+            exit $VERBOSE_EXIT
+          fi
           echo "✅ 详细模式编译成功"
         else
           echo "✅ 并行编译成功"
         fi
+
+        echo "===== 产物目录 ====="
+        ls -l bin/targets/*/* 2>/dev/null | head -20 || echo "⚠️ bin/targets 下没有产物"
 
         echo "status=success" >> $GITHUB_OUTPUT
         grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
         [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
       shell: bash
+
+    - name: Upload build log
+      if: always()
+      uses: actions/upload-artifact@main
+      with:
+        name: build-log-${{ matrix.device }}
+        path: |
+          openwrt/build_tail.txt
+          openwrt/build_errors.txt
+        if-no-files-found: ignore
 
     - name: df -hT
       if: (!cancelled())
@@ -318,7 +360,8 @@ jobs:
 
     - name: Organize files
       id: organize
-      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+      # 必须带 steps.compile 成功前置：否则编译失败时会用 "cd: No such file" 把真正的错误盖掉
+      if: env.UPLOAD_FIRMWARE == 'true' && steps.compile.outputs.status == 'success' && !cancelled()
       run: |
         cd openwrt/bin/targets/*/*
         rm -rf packages
