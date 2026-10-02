@@ -9,7 +9,7 @@
 	chassis-type = "embedded";
 
 	aliases {
-	        mmc0 = &sdhc_1; /* eMMC */
+		mmc0 = &sdhc_1; /* eMMC */
 		serial0 = &blsp_uart2;
 	};
 
@@ -32,6 +32,17 @@
 		};
 	};
 
+	/*
+	 * NOTE: the colour/function pair decides the sysfs name
+	 * (<colour>:<function>) that userspace scripts bind to.
+	 * /etc/hotplug.d/iface/99-wifi-led expects "green:wlan" and
+	 * "blue:wan", so this mapping must stay GREEN=WLAN / BLUE=WAN
+	 * (same as msm8916-ufi.dtsi).
+	 *
+	 * No "heartbeat" trigger on the power LED: it is driven by a
+	 * kernel timer that wakes an idle CPU once per second for no
+	 * reason on a headless modem stick.
+	 */
 	leds: leds {
 		compatible = "gpio-leds";
 
@@ -47,21 +58,21 @@
 			color = <LED_COLOR_ID_RED>;
 			default-state = "on";
 			function = LED_FUNCTION_POWER;
-			linux,default-trigger = "heartbeat";
 		};
 
 		led_g: led-g {
 			color = <LED_COLOR_ID_GREEN>;
 			default-state = "off";
-			function = LED_FUNCTION_WAN;
+			function = LED_FUNCTION_WLAN;
 		};
 
 		led_b: led-b {
 			color = <LED_COLOR_ID_BLUE>;
-			default-state = "on";
-			function = LED_FUNCTION_WLAN;
+			default-state = "off";
+			function = LED_FUNCTION_WAN;
 		};
 	};
+
 	usb_id: usb-id {
 		compatible = "linux,extcon-usb-gpio";
 		id-gpio = <&tlmm 110 GPIO_ACTIVE_HIGH>;
@@ -78,7 +89,20 @@
 	status = "okay";
 };
 
+/*
+ * FIX: the console UART needs its pads muxed.
+ * msm8916-ufi.dtsi sets blsp_uart2_console_default / _sleep here; this file
+ * only did "status = okay", which leaves gpio4/gpio5 unconfigured while the
+ * kernel console (console=ttyMSM0,115200) is still attached to the port.
+ * Unmuxed pads let the RX line float, which produces line-noise framing
+ * errors that the tty layer turns into a steady stream of interrupts and
+ * console output - pure overhead on a box whose only job is forwarding
+ * packets. Mux the pins properly (as ufi.dtsi does).
+ */
 &blsp_uart2 {
+	pinctrl-0 = <&blsp_uart2_console_default>;
+	pinctrl-1 = <&blsp_uart2_console_sleep>;
+	pinctrl-names = "default", "sleep";
 	status = "okay";
 };
 
@@ -119,12 +143,18 @@
 	extcon = <&usb_id>;
 };
 
+/*
+ * Venus is the video encode/decode core. This board is a headless 4G modem
+ * stick - there is no camera and no display, so enabling it only costs us
+ * 5 MB of reserved memory (venus_mem) plus permanently-on clocks and
+ * power/interconnect votes. Disabled.
+ */
 &venus {
-	status = "okay";
+	status = "disabled";
 };
 
 &venus_mem {
-	status = "okay";
+	status = "disabled";
 };
 
 &wcnss {
@@ -151,7 +181,7 @@
 		drive-strength = <2>;
 		bias-disable;
 	};
-	
+
 	usb_id_default: usb-id-default {
 		pins = "gpio110";
 		function = "gpio";

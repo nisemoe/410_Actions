@@ -7,6 +7,17 @@
 / {
 	model = "ufi-wf2 4G Modem Stick";
 	compatible = "xinxun,wf2", "qcom,msm8916";
+
+	/*
+	 * SIM card mux. These four lines drive an external SIM switch and are
+	 * exported through the gpio-leds driver (the usual trick on these
+	 * sticks, since there is no dedicated SIM-mux binding).
+	 *
+	 * sim_sel=on / sim_en=off  -> internal slot selected
+	 * sim_sel2=off / sim_en2=off -> second slot idle
+	 * Left exactly as in the original tree: this combination is what makes
+	 * the modem register (auto_apn reads the IMSI), so it must not change.
+	 */
 	leds: leds {
 		sim_sel {
 			label = "sim:sel";
@@ -34,6 +45,41 @@
 	};
 };
 
+/*
+ * ---------------------------------------------------------------------------
+ * Latency tuning - "WiFi is laggy even though CPU and RAM are idle"
+ * ---------------------------------------------------------------------------
+ *
+ * This stick is a network-forwarding appliance: LTE (bam_dmux -> modem) on
+ * one side, WCN3620/wcn36xx AP on the other. A forwarding box goes idle
+ * between packet bursts, and MSM8916 answers those gaps by powering the
+ * cores down (msm8916.dtsi defines the states below):
+ *
+ *   CPU_SLEEP_0    standalone power collapse   150 us exit / 2 ms residency
+ *   CLUSTER_RET    cluster retention           500 us exit / 2 ms residency
+ *   CLUSTER_PWRDN  cluster GDHS power-down    2000 us exit / 6 ms residency
+ *
+ * Every idle gap longer than the residency deadline costs the full exit
+ * latency before the next packet can even be looked at. That is pure added
+ * latency and jitter, and it is invisible in "CPU load" because the CPU is
+ * asleep - which is exactly why the box looks idle while the network feels
+ * slow.
+ *
+ * Policy changes only (the hardware numbers are unchanged):
+ *   - drop CLUSTER_PWRDN: 2 ms in + 2 ms out is far too expensive for a
+ *     device whose whole purpose is moving packets. Cluster retention (or
+ *     plain WFI) is kept, so power is still saved on a genuinely idle box.
+ *   - raise CPU_SLEEP_0 min-residency so a core is not collapsed in the
+ *     middle of a burst; real idles (tens of ms) still collapse.
+ */
+&CLUSTER_PD {
+	domain-idle-states = <&CLUSTER_RET>;
+};
+
+&CPU_SLEEP_0 {
+	min-residency-us = <20000>;
+};
+
 &button_restart {
 	gpios = <&tlmm 37 GPIO_ACTIVE_HIGH>;
 };
@@ -56,5 +102,5 @@
 };
 
 &gpio_leds_default {
-	pins = "gpio12","gpio22","gpio31","gpio38","gpio97","gpio98", "gpio108";
+	pins = "gpio12","gpio22","gpio31","gpio38","gpio97","gpio98","gpio108";
 };
