@@ -25,7 +25,7 @@ fi
 # 只取 lede/luci-app-turboacc（纯 LuCI 应用 + 可选 kmod-tcp-bbr），不应用 SFE 内核补丁，
 # 以免在 6.18 上编译失败，也避免绕过 CAKE。包默认 set '0'（关闭），不会自动开流控。
 if [ ! -d package/luci-app-turboacc ]; then
-	if git clone --depth 1 https://github.com/mufeng05/turboacc package/_turboacc_src; then
+	if git clone --depth 1 --branch main https://github.com/mufeng05/turboacc.git package/_turboacc_src; then
 		cp -rf package/_turboacc_src/lede/luci-app-turboacc package/luci-app-turboacc
 		rm -rf package/_turboacc_src
 		echo "✅ luci-app-turboacc 已放入 package/"
