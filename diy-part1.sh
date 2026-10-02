@@ -26,21 +26,66 @@ echo 'src-git small https://github.com/kenzok8/small' >> feeds.conf.default
 # 只有 .config 打开 CONFIG_TESTING_KERNEL=y（见 config/wf2-73.config）时才生效，
 # 走 6.18 的机型配置完全不受影响。
 # ---------------------------------------------------------------------------
-# 1) generic 层 config-7.3：上游不会为新内核提供，用当前最新的 config-x.y 复制一份。
-#    kconfig 里已不存在/改名的符号会在内核 olddefconfig 阶段自动丢弃或取默认值。
-if [ ! -f target/linux/generic/config-7.3 ]; then
-	base=$(ls -1 target/linux/generic/config-* 2>/dev/null | grep -E 'config-[0-9]+\.[0-9]+$' | sort -V | tail -1)
-	if [ -n "$base" ]; then
-		cp -f "$base" target/linux/generic/config-7.3
-		echo "✅ 已由 $base 生成 target/linux/generic/config-7.3"
+# 注意：不能只依赖脚本开头那条 cp -rf —— 一旦仓库里 patches-7.3 这类**新目录**
+# 没被提交推送，Actions 的 checkout 就拿不到，编译会在打补丁阶段炸掉。
+# 所以下面每个文件都做"缺失就从仓库源取，再没有就就地用 6.18 生成"的兜底。
+
+WS="${GITHUB_WORKSPACE:-$(cd .. && pwd)}"
+K73_SRC="$WS/scripts/msm89xx/target/linux"
+
+# 1) generic/kernel-7.3：内核版本号（缺了 kernel-version.mk 会直接 error）
+if [ ! -f target/linux/generic/kernel-7.3 ]; then
+	if [ -f "$K73_SRC/generic/kernel-7.3" ]; then
+		cp -f "$K73_SRC/generic/kernel-7.3" target/linux/generic/kernel-7.3
+		echo "✅ 已补回 target/linux/generic/kernel-7.3"
 	else
-		echo "⚠️ 未找到可用的 generic config-* 作为 config-7.3 模板"
+		printf 'LINUX_VERSION-7.3 = -rc5\n' > target/linux/generic/kernel-7.3
+		echo "⚠️ 仓库未带 generic/kernel-7.3，已按 -rc5 现场生成"
 	fi
-else
-	echo "✅ target/linux/generic/config-7.3 已存在（上游已提供）"
 fi
 
-# 2) 校验 7.3 编译必需的文件是否齐全
+# 2) generic/config-7.3：上游不会为新内核提供，用最新的 config-x.y 复制一份。
+#    kconfig 里已不存在/改名的符号会在内核 olddefconfig 阶段自动丢弃或取默认值。
+if [ ! -f target/linux/generic/config-7.3 ]; then
+	if [ -f "$K73_SRC/generic/config-7.3" ]; then
+		cp -f "$K73_SRC/generic/config-7.3" target/linux/generic/config-7.3
+		echo "✅ 已补回 target/linux/generic/config-7.3"
+	else
+		base=$(ls -1 target/linux/generic/config-* 2>/dev/null | grep -E 'config-[0-9]+\.[0-9]+$' | sort -V | tail -1)
+		if [ -n "$base" ]; then
+			cp -f "$base" target/linux/generic/config-7.3
+			echo "✅ 已由 $base 生成 target/linux/generic/config-7.3"
+		else
+			echo "⚠️ 未找到可用的 generic config-* 作为 config-7.3 模板"
+		fi
+	fi
+fi
+
+# 3) msm89xx/config-7.3
+if [ ! -f target/linux/msm89xx/config-7.3 ]; then
+	if [ -f "$K73_SRC/msm89xx/config-7.3" ]; then
+		cp -f "$K73_SRC/msm89xx/config-7.3" target/linux/msm89xx/config-7.3
+		echo "✅ 已补回 target/linux/msm89xx/config-7.3"
+	elif [ -f target/linux/msm89xx/config-6.18 ]; then
+		cp -f target/linux/msm89xx/config-6.18 target/linux/msm89xx/config-7.3
+		echo "⚠️ 仓库未带 msm89xx/config-7.3，已由 config-6.18 就地生成"
+	fi
+fi
+
+# 4) msm89xx/patches-7.3（目录，最容易漏提交）
+if [ ! -d target/linux/msm89xx/patches-7.3 ] || [ -z "$(ls -A target/linux/msm89xx/patches-7.3 2>/dev/null)" ]; then
+	if [ -d "$K73_SRC/msm89xx/patches-7.3" ]; then
+		mkdir -p target/linux/msm89xx/patches-7.3
+		cp -rf "$K73_SRC/msm89xx/patches-7.3/." target/linux/msm89xx/patches-7.3/
+		echo "✅ 已补回 target/linux/msm89xx/patches-7.3"
+	elif [ -d target/linux/msm89xx/patches-6.18 ]; then
+		cp -rf target/linux/msm89xx/patches-6.18 target/linux/msm89xx/patches-7.3
+		echo "⚠️ 仓库未带 msm89xx/patches-7.3，已由 patches-6.18 就地生成"
+	fi
+fi
+
+# 5) 最终校验：还缺就报错，避免后面以"编了个没补丁的内核"的方式假成功
+miss=0
 for f in target/linux/generic/kernel-7.3 \
 	target/linux/generic/config-7.3 \
 	target/linux/msm89xx/config-7.3 \
@@ -48,7 +93,9 @@ for f in target/linux/generic/kernel-7.3 \
 	if [ -e "$f" ]; then
 		echo "✅ $f"
 	else
-		echo "⚠️ 缺少 $f —— 使用 7.3-rc5 内核编译会失败"
+		echo "❌ 仍然缺少 $f —— 请确认仓库里 scripts/msm89xx/target/ 下的 7.3 新文件已提交并推送"
+		miss=1
 	fi
 done
+[ "$miss" = "1" ] && echo "::error::7.3-rc5 所需文件缺失，本次若使用 CONFIG_TESTING_KERNEL=y 会编译失败"
 
