@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# Linux 7.3-rc5 (mainline / "testing" kernel) for the msm89xx (MSM8916) target.
+#
+# Same format as the upstream target/linux/generic/kernel-<x.y> files:
+#   LINUX_VERSION-<x.y>          -> suffix appended to KERNEL_PATCHVER
+#   LINUX_KERNEL_HASH-<x.y[-rc]> -> sha256 of the tarball (optional)
+#
+# LINUX_VERSION then becomes 7.3 + "-rc5" = 7.3-rc5, and because it contains
+# "-rc", include/kernel.mk automatically switches the download to:
+#   LINUX_SOURCE := linux-7.3-rc5.tar.gz
+#   LINUX_SITE   := https://git.kernel.org/torvalds/t
+# (rc tarballs are only published on git.kernel.org, NOT on cdn.kernel.org,
+#  which is why the usual v7.x path is not used here.)
+#
+# LINUX_KERNEL_HASH-7.3-rc5 is intentionally NOT defined: include/kernel-version.mk
+# falls back to "x" and the checksum verification is skipped. To pin the hash,
+# build once and then add the printed value:
+#   sha256sum dl/linux-7.3-rc5.tar.gz
+#   LINUX_KERNEL_HASH-7.3-rc5 = <sha256>
+#
+# Bump the rc number here when moving to a newer rc (e.g. "-rc6").
+LINUX_VERSION-7.3 = -rc5
