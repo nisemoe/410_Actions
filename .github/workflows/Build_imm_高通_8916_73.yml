@@ -284,12 +284,29 @@ jobs:
     - name: Download package
       run: |
         cd openwrt
-        [ "${{ steps.cache-dl.outputs.cache-hit }}" = "true" ] && echo "cache hit" || echo "cache miss"
-        output=$(make download -j$(nproc) -k V=s 2>&1)
-        if echo "$output" | grep -qiE "Hash verification failed|checksum mismatch|ERROR"; then
-          echo "===== download errors ====="
-          echo "$output" | grep -iE "Hash verification failed|checksum mismatch|ERROR"
+        if [ "${{ steps.cache-dl.outputs.cache-hit }}" = "true" ]; then echo "cache hit"; else echo "cache miss"; fi
+
+        # 不要把 make 的输出吞进变量：失败时什么都看不到。改成 tee 出来，失败再打印尾部。
+        set +e
+        make download -j$(nproc) -k V=s 2>&1 | tee download.log
+        DL_EXIT=${PIPESTATUS[0]}
+        set -e
+
+        if [ $DL_EXIT -ne 0 ]; then
+          echo "::group::❌ make download 失败（退出码 $DL_EXIT）"
+          tail -n 200 download.log
+          echo "----- 错误关键字 -----"
+          grep -iE "Cannot find appropriate hash|Hash|checksum|ERROR|error:|No such file|failed|giving up" download.log | tail -n 60
+          echo "::endgroup::"
+          echo "----- 内核源码包 -----"
+          ls -l dl/linux-7.3-rc5.tar.gz 2>/dev/null || echo "⚠️ dl/ 下没有 linux-7.3-rc5.tar.gz"
+          exit $DL_EXIT
         fi
+
+        echo "----- 下载告警/错误 -----"
+        grep -iE "Hash verification failed|checksum mismatch|ERROR" download.log || true
+        echo "----- 内核源码包 -----"
+        ls -l dl/linux-7.3-rc5.tar.gz || echo "⚠️ dl/ 下没有 linux-7.3-rc5.tar.gz"
       shell: bash
     
     - name: make -j$(nproc)
