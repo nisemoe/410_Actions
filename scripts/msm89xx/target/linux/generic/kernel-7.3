@@ -13,11 +13,24 @@
 # (rc tarballs are only published on git.kernel.org, NOT on cdn.kernel.org,
 #  which is why the usual v7.x path is not used here.)
 #
-# LINUX_KERNEL_HASH-7.3-rc5 is intentionally NOT defined: include/kernel-version.mk
-# falls back to "x" and the checksum verification is skipped. To pin the hash,
-# build once and then add the printed value:
-#   sha256sum dl/linux-7.3-rc5.tar.gz
-#   LINUX_KERNEL_HASH-7.3-rc5 = <sha256>
+# ⚠️ 必须显式写 LINUX_KERNEL_HASH-7.3-rc5 = skip，不能省略！
 #
-# Bump the rc number here when moving to a newer rc (e.g. "-rc6").
+# 省略时 include/kernel-version.mk 会退化成 LINUX_KERNEL_HASH?=x。
+# 但 scripts/download.pl 只认三种值：
+#   64 位字符串 -> sha256、32 位 -> md5、字面量 "skip" -> 不校验
+# 其它值（包括 "x"）会走到
+#   $hash_cmd or ($file_hash eq "skip") or die "Cannot find appropriate hash command..."
+# 直接 die -> make download 退出码 2（表现为 Download package 步骤失败且看不到原因）。
+#
+# 用 "skip" 而不是真实 sha256 的原因：rc 包是 git.kernel.org 的 cgit 在线快照，
+# 官方不发布校验和，且不同节点生成的 tar.gz 不保证字节一致，写死 hash 反而容易误报。
+# download.pl 在文件已存在时会直接 exit 0，不会重复下载（见 download.pl 的
+# `if (-f "$target/$filename")` 分支，$hash_cmd 为空时跳过校验）。
+#
+# 想固定校验和也可以：下载一次后
+#   sha256sum dl/linux-7.3-rc5.tar.gz
+# 把值改成 LINUX_KERNEL_HASH-7.3-rc5 = <64位sha256> 即可。
+#
+# Bump 到更新的 rc（如 rc6）时，两行都要改（版本号和 hash 变量名）。
 LINUX_VERSION-7.3 = -rc5
+LINUX_KERNEL_HASH-7.3-rc5 = skip
