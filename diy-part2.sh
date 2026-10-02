@@ -44,19 +44,28 @@ if [ ! -e package/luci.mk ] && [ -e feeds/luci/luci.mk ]; then
 	echo "✅ 已建 package/luci.mk -> feeds/luci/luci.mk"
 fi
 
-# mosdns 打包冲突修复
-# luci-app-mosdns 依赖 mosdns（+mosdns），二者必然同时被安装；但 luci-app-mosdns 的
-# root/etc/init.d/mosdns 与 mosdns 核心包自带的同名 init 脚本冲突，opkg 安装阶段会报
-# “trying to overwrite etc/init.d/mosdns owned by mosdns” 而构建失败。
-# 去掉 luci-app-mosdns 自带的重复 init 脚本，保留 mosdns 核心包的（功能正常、UI 仍调用它）。
-for p in \
-	feeds/small/luci-app-mosdns/root/etc/init.d/mosdns \
-	package/feeds/small/luci-app-mosdns/root/etc/init.d/mosdns; do
-	if [ -f "$p" ]; then
-		rm -f "$p"
-		echo "✅ 已移除冲突文件 $p（避免与 mosdns 核心包冲突）"
-	fi
-done
+# mosdns 打包冲突修复（版本无关，覆盖旧版 feed 的多个冲突文件）
+# luci-app-mosdns 依赖 mosdns（+mosdns），二者必然同时被安装。旧版 mosdns 核心包
+# （如 5.3.3-r1）通过 root/ 或 files/ 自带 /etc/init.d/mosdns、/etc/config/mosdns、
+# /etc/mosdns/*、/usr/share/mosdns/* 等，与 luci-app-mosdns 自带的重名 -> opkg 报
+# “trying to overwrite ... owned by mosdns” 而构建失败。
+# 新版 mosdns 核心包（如 5.3.4+，GoBinPackage）只含二进制（无 root/），此时
+# luci-app-mosdns 是这些文件的唯一提供方，本就不应删除。
+# 因此：只删 luci-app-mosdns/root 下、且 mosdns 核心包（root/ 或 files/）也提供的文件，
+# 交集为空时不删任何东西，两种 feed 版本都安全。
+mosdns_core=feeds/small/mosdns
+luci_mosdns=feeds/small/luci-app-mosdns/root
+if [ -d "$luci_mosdns" ]; then
+	while IFS= read -r f; do
+		rel="${f#"$luci_mosdns"/}"
+		if [ -e "$mosdns_core/root/$rel" ] || [ -e "$mosdns_core/files/$rel" ]; then
+			rm -f "$f"
+			echo "✅ 移除冲突文件 luci-app-mosdns/root/$rel（mosdns 核心包已提供）"
+		fi
+	done < <(cd "$luci_mosdns" && find . -type f)
+else
+	echo "ℹ️ 未找到 feeds/small/luci-app-mosdns/root，跳过 mosdns 冲突修复"
+fi
 
 # 北大源
 cp -r "$GITHUB_WORKSPACE/scripts/files-8916" "$GITHUB_WORKSPACE/openwrt/files"
