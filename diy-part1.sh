@@ -33,6 +33,27 @@ echo 'src-git small https://github.com/kenzok8/small' >> feeds.conf.default
 WS="${GITHUB_WORKSPACE:-$(cd .. && pwd)}"
 K73_SRC="$WS/scripts/msm89xx/target/linux"
 
+# 0) 关键：目标 Makefile 必须声明 testing-kernel + KERNEL_TESTING_PATCHVER:=7.3。
+#    缺了它 HAS_TESTING_KERNEL 就不会被 select，defconfig 会把 .config 里的
+#    CONFIG_TESTING_KERNEL=y / CONFIG_LINUX_7_3=y 静默删掉 -> 实际编出来是 6.18！
+#    所以这里不依赖仓库是否已推送该 Makefile，缺什么就地补什么。
+MK=target/linux/msm89xx/Makefile
+if [ -f "$MK" ]; then
+	sed -i 's/\r$//' "$MK"
+	if ! grep -q "KERNEL_TESTING_PATCHVER" "$MK"; then
+		sed -i '/^KERNEL_PATCHVER:=/a KERNEL_TESTING_PATCHVER:=7.3' "$MK"
+		echo "⚠️ 目标 Makefile 缺 KERNEL_TESTING_PATCHVER，已就地补上 7.3"
+	fi
+	if ! grep -q "testing-kernel" "$MK"; then
+		sed -i 's/^FEATURES:=.*/& testing-kernel/' "$MK"
+		echo "⚠️ 目标 Makefile FEATURES 缺 testing-kernel，已就地补上"
+	fi
+	echo "----- target/linux/msm89xx/Makefile 内核相关行 -----"
+	grep -nE "FEATURES|KERNEL_PATCHVER|KERNEL_TESTING_PATCHVER" "$MK" || true
+else
+	echo "❌ 找不到 target/linux/msm89xx/Makefile"
+fi
+
 # 1) generic/kernel-7.3：内核版本号（缺了 kernel-version.mk 会直接 error）
 if [ ! -f target/linux/generic/kernel-7.3 ]; then
 	if [ -f "$K73_SRC/generic/kernel-7.3" ]; then
@@ -89,7 +110,9 @@ for f in target/linux/generic/kernel-7.3 \
 	target/linux/generic/config-7.3 \
 	target/linux/msm89xx/config-7.3 \
 	target/linux/msm89xx/patches-7.3/*.patch; do
-	[ -f "$f" ] && sed -i 's/\r$//' "$f"
+	if [ -f "$f" ]; then
+		sed -i 's/\r$//' "$f"
+	fi
 done
 
 # 6) 最终校验：还缺就报错，避免后面以"编了个没补丁的内核"的方式假成功
@@ -105,5 +128,11 @@ for f in target/linux/generic/kernel-7.3 \
 		miss=1
 	fi
 done
-[ "$miss" = "1" ] && echo "::error::7.3-rc5 所需文件缺失，本次若使用 CONFIG_TESTING_KERNEL=y 会编译失败"
+if [ "$miss" = "1" ]; then
+	echo "::error::7.3-rc5 所需文件缺失，本次若使用 CONFIG_TESTING_KERNEL=y 会编译失败"
+fi
+
+# 注意：GitHub 的 shell 是 bash -e（-e 会把"返回非 0 的最后一条命令"当成步骤失败），
+# 所以本文件里一律用 if...fi，不能写 `[ 条件 ] && 命令` —— 条件为假时返回 1 会让整个步骤红掉。
+exit 0
 
