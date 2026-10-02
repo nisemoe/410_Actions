@@ -84,7 +84,15 @@ if [ ! -d target/linux/msm89xx/patches-7.3 ] || [ -z "$(ls -A target/linux/msm89
 	fi
 fi
 
-# 5) 最终校验：还缺就报错，避免后面以"编了个没补丁的内核"的方式假成功
+# 5) 兜底：万一文件是 Windows 编辑器上传带上的 CRLF，make/patch 都会出问题，统一清掉行尾 \r
+for f in target/linux/generic/kernel-7.3 \
+	target/linux/generic/config-7.3 \
+	target/linux/msm89xx/config-7.3 \
+	target/linux/msm89xx/patches-7.3/*.patch; do
+	[ -f "$f" ] && sed -i 's/\r$//' "$f"
+done
+
+# 6) 最终校验：还缺就报错，避免后面以"编了个没补丁的内核"的方式假成功
 miss=0
 for f in target/linux/generic/kernel-7.3 \
 	target/linux/generic/config-7.3 \
