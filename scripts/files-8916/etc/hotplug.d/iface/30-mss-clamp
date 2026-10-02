@@ -1,0 +1,32 @@
+#!/bin/sh
+#
+# Clamp TCP MSS on the LTE interface as soon as it comes up.
+#
+# The bearer advertises MTU 1500 but adds its own encapsulation, so a full
+# size segment can be dropped silently. The symptom is not "slow" but
+# "stalled": some TCP connections simply never progress while others are
+# fine, which reads as a very laggy connection.
+#
+# Cannot be done from net-latency-tune (START=97) because the modem interface
+# does not exist yet at that point.
+
+[ "$ACTION" = "ifup" ] || exit 0
+
+case "$INTERFACE" in
+	modem|wan|wwan|wan6) ;;
+	*) exit 0 ;;
+esac
+
+DEV=$(ubus call network.interface."$INTERFACE" status 2>/dev/null \
+	| jsonfilter -q -e '@["l3_device"]' \
+	| head -1)
+
+[ -n "$DEV" ] || exit 0
+[ -d "/sys/class/net/$DEV" ] || exit 0
+
+iptables -t mangle -C FORWARD -o "$DEV" -p tcp --tcp-flags SYN,RST SYN \
+	-j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || \
+iptables -t mangle -A FORWARD -o "$DEV" -p tcp --tcp-flags SYN,RST SYN \
+	-j TCPMSS --clamp-mss-to-pmtu 2>/dev/null
+
+logger -t mss-clamp "clamped MSS on $DEV ($INTERFACE)"
