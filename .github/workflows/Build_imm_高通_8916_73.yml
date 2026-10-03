@@ -359,8 +359,14 @@ jobs:
           grep -oE "ERROR: module '[^']+' is missing" build.log | sort -u | tee -a build_failed_pkgs.txt
           echo "----- 首个真正的编译错误（带上下文）-----"
           grep -nE "error:|fatal error:|No such file or directory|Error [0-9]" build.log | head -n 40
-          tail -n 400 build.log > build_tail.txt
-          grep -nE "Error [0-9]|error:|ERROR:|\*\*\*|No rule to make target" build.log | tail -n 200 > build_errors.txt
+          grep -nE "Error [0-9]|error:|ERROR:|\*\*\*|No rule to make target|is missing|undefined reference|No such file" build.log | tail -n 2000 > build_errors.txt
+          tail -n 3000 build.log > build_tail.txt
+
+          echo "----- 逐个复现失败包（make -j1 V=s，取最后 200 行）-----"
+          for p in $(grep -oE '^[^ ]+ failed to build' build_failed_pkgs.txt | awk '{print $1}'); do
+            echo "########## 复现 $p ##########"
+            make -j1 V=s -C "$p" compile 2>&1 | tail -n 200 || true
+          done
 
           echo "⚠️ 并行编译失败，切换到详细模式..."
           set +e
@@ -373,8 +379,8 @@ jobs:
             echo "::endgroup::"
             grep -oE "ERROR: [^ ]+ failed to build" build_verbose.log | sed 's/^ERROR: //' | sort -u | tee build_failed_pkgs.txt
             grep -oE "ERROR: module '[^']+' is missing" build_verbose.log | sort -u | tee -a build_failed_pkgs.txt
-            tail -n 400 build_verbose.log > build_tail.txt
-            grep -nE "Error [0-9]|error:|ERROR:|\*\*\*|No rule to make target" build_verbose.log | tail -n 200 > build_errors.txt
+            grep -nE "Error [0-9]|error:|ERROR:|\*\*\*|No rule to make target|is missing|undefined reference|No such file" build_verbose.log | tail -n 2000 > build_errors.txt
+            tail -n 3000 build_verbose.log > build_tail.txt
             echo "::error::编译失败 —— 看上面的日志尾部，或下载 build-log 工件里的 build_errors.txt"
             exit $VERBOSE_EXIT
           fi
