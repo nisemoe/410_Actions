@@ -335,58 +335,56 @@ jobs:
         set -e
 
         if [ $BUILD_EXIT -ne 0 ]; then
-          echo "::group::❌ 并行编译失败（退出码 $BUILD_EXIT）—— 错误定位"
-          echo "----- 日志最后 200 行 -----"
-          tail -n 200 build.log
-          echo "----- 关键字命中（最后 60 行）-----"
-          grep -nE "Error [0-9]|error:|ERROR:|\*\*\*|No rule to make target|No such file" build.log | tail -n 60
-          echo "::endgroup::"
+    echo "::group::❌ 并行编译失败（退出码 $BUILD_EXIT）—— 错误定位"
+    echo "----- build.log 全文（最后 3000 行）-----"
+    tail -n 3000 build.log || true
+    echo "----- 关键字命中 -----"
+    grep -nE "Error [0-9]|error:|ERROR:|\*\*\*|No rule to make target|is missing|undefined reference|No such file|not available in the kernel" build.log | tail -n 2000 > build_errors.txt || true
+    cat build_errors.txt || true
+    tail -n 3000 build.log > build_tail.txt || true
 
-          # 7.3-rc5 常见坑的定向提示
-          if grep -qiE "backports|wcn36xx|mac80211|cfg80211" build.log; then
-            echo "::warning::日志出现 backports/wcn36xx：多半是 openwrt/backports v7.2 与 7.3-rc5 头文件不兼容 —— 见 KERNEL-7.3-rc5-适配说明.md 的 Plan B（改用内核内建 CONFIG_WCN36XX=m）"
-          fi
-          if grep -qiE "linux-7\.3-rc5|tar\.gz|Hash verification|checksum" build.log; then
-            echo "::warning::日志出现内核源码/下载相关报错：确认 dl/linux-7.3-rc5.tar.gz 是否下载完整（rc 包走 git.kernel.org，不走 cdn）"
-          fi
-          if grep -qiE "is not set|not available in the kernel config" build.log; then
-            echo "::warning::有 kmod 因内核配置不可用被跳过：config-7.3 是从 6.18 复制的，7.3 里改名/删除的符号会被 olddefconfig 丢掉"
-          fi
+    echo "----- 失败的包汇总（本轮全部，而不是只看到第一个）-----"
+    grep -oE "ERROR: [^ ]+ failed to build" build.log | sed 's/^ERROR: //' | sort -u > build_failed_pkgs.txt || true
+    cat build_failed_pkgs.txt || true
+    echo "----- module is missing 汇总 -----"
+    grep -oE "ERROR: module '[^']+' is missing" build.log | sort -u >> build_failed_pkgs.txt || true
+    echo "----- kmod 在内核配置里不可用（7.3 常见）-----"
+    grep -oE "WARNING: kmod-[^ ]+ is not available in the kernel config" build.log | sort -u >> build_failed_pkgs.txt || true
+    echo "::endgroup::"
 
-          echo "----- 失败的包汇总（本轮全部，而不是只看到第一个）-----"
-          grep -oE "ERROR: [^ ]+ failed to build" build.log | sed 's/^ERROR: //' | sort -u | tee build_failed_pkgs.txt
-          echo "----- module is missing 汇总 -----"
-          grep -oE "ERROR: module '[^']+' is missing" build.log | sort -u | tee -a build_failed_pkgs.txt
-          echo "----- 首个真正的编译错误（带上下文）-----"
-          grep -nE "error:|fatal error:|No such file or directory|Error [0-9]" build.log | head -n 40
-          grep -nE "Error [0-9]|error:|ERROR:|\*\*\*|No rule to make target|is missing|undefined reference|No such file" build.log | tail -n 2000 > build_errors.txt
-          tail -n 3000 build.log > build_tail.txt
+    echo "::group::🔁 逐个复现失败包（make -j1 V=s，完整错误可见）"
+    REPRO_ERR=0
+    if [ -s build_failed_pkgs.txt ]; then
+      for p in $(grep -oE '^[^ ]+ failed to build' build_failed_pkgs.txt | awk '{print $1}' | sort -u); do
+        slug=$(echo "$p" | tr '/' '_')
+        echo "########## 复现 $p ##########"
+        make -j1 V=s -C "$p" compile > "repro_${slug}.log" 2>&1 || true
+        echo "----- $p 复现日志（最后 400 行）-----"
+        tail -n 400 "repro_${slug}.log" || true
+        if grep -qiE "error|missing|No such file" "repro_${slug}.log"; then REPRO_ERR=1; fi
+      done
+    else
+      echo "⚠️ 没有解析出失败包名，直接复现 package/kernel/linux"
+      make -j1 V=s -C package/kernel/linux compile > repro_package_kernel_linux.log 2>&1 || true
+      tail -n 400 repro_package_kernel_linux.log || true
+      if grep -qiE "error|missing|No such file" repro_package_kernel_linux.log; then REPRO_ERR=1; fi
+    fi
+    echo "::endgroup::"
 
-          echo "----- 逐个复现失败包（make -j1 V=s，取最后 200 行）-----"
-          for p in $(grep -oE '^[^ ]+ failed to build' build_failed_pkgs.txt | awk '{print $1}'); do
-            echo "########## 复现 $p ##########"
-            make -j1 V=s -C "$p" compile 2>&1 | tail -n 200 || true
-          done
+    if [ "$REPRO_ERR" -eq 0 ]; then
+      echo "::group::⚠️ 复现未报错 —— 退化为全量详细模式重试"
+      set +e
+      make -j8 V=s -k 2>&1 | tee build_verbose.log
+      set -e
+      grep -nE "Error [0-9]|error:|ERROR:|\*\*\*|No rule to make target|is missing|undefined reference|No such file" build_verbose.log | tail -n 2000 > build_errors.txt || true
+      tail -n 3000 build_verbose.log > build_tail.txt || true
+      echo "::endgroup::"
+    fi
 
-          echo "⚠️ 并行编译失败，切换到详细模式..."
-          set +e
-          make -j8 V=s -k 2>&1 | tee build_verbose.log
-          VERBOSE_EXIT=${PIPESTATUS[0]}
-          set -e
-          if [ $VERBOSE_EXIT -ne 0 ]; then
-            echo "::group::❌ 详细模式也失败（退出码 $VERBOSE_EXIT）"
-            tail -n 200 build_verbose.log
-            echo "::endgroup::"
-            grep -oE "ERROR: [^ ]+ failed to build" build_verbose.log | sed 's/^ERROR: //' | sort -u | tee build_failed_pkgs.txt
-            grep -oE "ERROR: module '[^']+' is missing" build_verbose.log | sort -u | tee -a build_failed_pkgs.txt
-            grep -nE "Error [0-9]|error:|ERROR:|\*\*\*|No rule to make target|is missing|undefined reference|No such file" build_verbose.log | tail -n 2000 > build_errors.txt
-            tail -n 3000 build_verbose.log > build_tail.txt
-            echo "::error::编译失败 —— 看上面的日志尾部，或下载 build-log 工件里的 build_errors.txt"
-            exit $VERBOSE_EXIT
-          fi
-          echo "✅ 详细模式编译成功"
-        else
-          echo "✅ 并行编译成功"
+    echo "::error::编译失败 —— 看上面的日志，或下载 build-log 工件里的 repro_*.log"
+    exit 1
+  fi
+  echo "✅ 并行编译成功"
         fi
 
         echo "===== 产物目录 ====="
@@ -407,6 +405,8 @@ jobs:
           openwrt/build_tail.txt
           openwrt/build_errors.txt
           openwrt/build_failed_pkgs.txt
+          openwrt/build.log
+          openwrt/repro_*.log
         if-no-files-found: ignore
 
     - name: df -hT
