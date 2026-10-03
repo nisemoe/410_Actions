@@ -126,6 +126,91 @@ for f in target/linux/generic/kernel-7.3 \
 	fi
 done
 
+# 5b) 7.3 删掉了 UAPI 头 include/uapi/linux/atmsvc.h（v6.18 还在，v7.3-rc5 上已 404）。
+#     linux-atm 的 src/test/isp.c 会 #include <linux/atmsvc.h>，而它是用
+#     TARGET_CFLAGS += -I$(LINUX_DIR)/user_headers/include 编的（目标内核头文件，
+#     不是工具链头文件），于是 7.3 上直接 fatal error: linux/atmsvc.h: No such file。
+#     处理办法：把 v6.18 的 atmsvc.h 放进包内 compat/linux/，再给该包追加一条 -I。
+#     它依赖的 atmapi.h / atm.h / atmioc.h 在 7.3 里都还在（atm_kptr_t、
+#     __ATM_API_ALIGN、sockaddr_atmsvc、ATMIOC_SPECIAL 均健在），可以原样复用。
+#     只动这一个包的 CFLAGS，不动内核树，风险最小。
+ATM_DIR=package/network/utils/linux-atm
+if [ -d "$ATM_DIR" ]; then
+	mkdir -p "$ATM_DIR/compat/linux"
+	cat > "$ATM_DIR/compat/linux/atmsvc.h" <<'ATMSVC_EOF'
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
+/* atmsvc.h - ATM signaling kernel-demon interface definitions */
+
+/* Written 1995-2000 by Werner Almesberger, EPFL LRC/ICA */
+
+
+#ifndef _LINUX_ATMSVC_H
+#define _LINUX_ATMSVC_H
+
+#include <linux/atmapi.h>
+#include <linux/atm.h>
+#include <linux/atmioc.h>
+
+
+#define ATMSIGD_CTRL _IO('a',ATMIOC_SPECIAL)
+				/* become ATM signaling demon control socket */
+
+enum atmsvc_msg_type { as_catch_null, as_bind, as_connect, as_accept, as_reject,
+		       as_listen, as_okay, as_error, as_indicate, as_close,
+		       as_itf_notify, as_modify, as_identify, as_terminate,
+		       as_addparty, as_dropparty };
+
+struct atmsvc_msg {
+	enum atmsvc_msg_type type;
+	atm_kptr_t vcc;
+	atm_kptr_t listen_vcc;		/* indicate */
+	int reply;			/* for okay and close:		   */
+					/*   < 0: error before active	   */
+					/*        (sigd has discarded ctx) */
+					/*   ==0: success		   */
+				        /*   > 0: error when active (still */
+					/*        need to close)	   */
+	struct sockaddr_atmpvc pvc;	/* indicate, okay (connect) */
+	struct sockaddr_atmsvc local;	/* local SVC address */
+	struct atm_qos qos;		/* QOS parameters */
+	struct atm_sap sap;		/* SAP */
+	unsigned int session;		/* for p2pm */
+	struct sockaddr_atmsvc svc;	/* SVC address */
+} __ATM_API_ALIGN;
+
+/*
+ * Message contents: see ftp://icaftp.epfl.ch/pub/linux/atm/docs/isp-*.tar.gz
+ */
+
+/*
+ * Some policy stuff for atmsigd and for net/atm/svc.c. Both have to agree on
+ * what PCR is used to request bandwidth from the device driver. net/atm/svc.c
+ * tries to do better than that, but only if there's no routing decision (i.e.
+ * if signaling only uses one ATM interface).
+ */
+
+#define SELECT_TOP_PCR(tp) ((tp).pcr ? (tp).pcr : \
+  (tp).max_pcr && (tp).max_pcr != ATM_MAX_PCR ? (tp).max_pcr : \
+  (tp).min_pcr ? (tp).min_pcr : ATM_MAX_PCR)
+
+#endif
+ATMSVC_EOF
+	sed -i 's/\r$//' "$ATM_DIR/compat/linux/atmsvc.h"
+	if [ -f "$ATM_DIR/Makefile" ]; then
+		if ! grep -q "linux-atm/compat" "$ATM_DIR/Makefile"; then
+			printf '\n# 7.3 移除了 include/uapi/linux/atmsvc.h，用包内 compat 目录补回（见 diy-part1.sh）\nTARGET_CFLAGS += -I$(TOPDIR)/%s/compat\n' "$ATM_DIR" >> "$ATM_DIR/Makefile"
+			echo "✅ linux-atm 已追加 -I compat（补回 linux/atmsvc.h）"
+		else
+			echo "ℹ️ linux-atm 已带 compat -I，跳过"
+		fi
+		grep -n "TARGET_CFLAGS" "$ATM_DIR/Makefile" || true
+	else
+		echo "⚠️ 未找到 $ATM_DIR/Makefile，无法补 atmsvc.h 的 -I"
+	fi
+else
+	echo "ℹ️ 上游没有 package/network/utils/linux-atm，跳过 ATM 头兼容"
+fi
+
 # 6) 最终校验：还缺就报错，避免后面以"编了个没补丁的内核"的方式假成功
 miss=0
 for f in target/linux/generic/kernel-7.3 \
