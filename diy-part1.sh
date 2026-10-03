@@ -134,6 +134,18 @@ if [ -d target/linux/msm89xx/patches-7.3 ]; then
 	ls -1 target/linux/msm89xx/patches-7.3 || true
 fi
 
+# 4c) 工具链内核头文件补丁目录。
+#     注意：**用户态程序用的是 toolchain 里的内核头文件**（
+#     staging_dir/toolchain-*/include），不是 target/linux 下的那份。
+#     toolchain/kernel-headers 的 PATCH_DIR 是 ./patches（或 ./patches-<版本>），
+#     所以 7.3 的 UAPI 用户态可见性问题（例如 __u128）必须补在这里才会生效。
+if [ -d toolchain/kernel-headers/patches ]; then
+	echo "----- toolchain/kernel-headers/patches 内容 -----"
+	ls -1 toolchain/kernel-headers/patches || true
+else
+	echo "::warning::toolchain/kernel-headers/patches 不存在，7.3 UAPI 补丁不会被应用到工具链头文件！"
+fi
+
 # 5) 兜底：万一文件是 Windows 编辑器上传带上的 CRLF，make/patch 都会出问题，统一清掉行尾 \r
 for f in target/linux/generic/kernel-7.3 \
 	target/linux/generic/config-7.3 \
