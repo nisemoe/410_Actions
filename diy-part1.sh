@@ -127,13 +127,20 @@ for f in target/linux/generic/kernel-7.3 \
 done
 
 # 5b) 7.3 删掉了 UAPI 头 include/uapi/linux/atmsvc.h（v6.18 还在，v7.3-rc5 上已 404）。
-#     linux-atm 的 src/test/isp.c 会 #include <linux/atmsvc.h>，而它是用
-#     TARGET_CFLAGS += -I$(LINUX_DIR)/user_headers/include 编的（目标内核头文件，
-#     不是工具链头文件），于是 7.3 上直接 fatal error: linux/atmsvc.h: No such file。
-#     处理办法：把 v6.18 的 atmsvc.h 放进包内 compat/linux/，再给该包追加一条 -I。
-#     它依赖的 atmapi.h / atm.h / atmioc.h 在 7.3 里都还在（atm_kptr_t、
-#     __ATM_API_ALIGN、sockaddr_atmsvc、ATMIOC_SPECIAL 均健在），可以原样复用。
-#     只动这一个包的 CFLAGS，不动内核树，风险最小。
+#     linux-atm 的 src/test/isp.c 和 ispl_y.y 都 #include <linux/atmsvc.h>，
+#     而它是用 TARGET_CFLAGS += -I$(LINUX_DIR)/user_headers/include 编的
+#     （目标内核导出的头文件，不是工具链头文件），于是 7.3 上直接
+#     fatal error: linux/atmsvc.h: No such file。
+#
+#     两层修复（互为冗余，任一生效即可，确保稳健）：
+#     [主] 在内核树里用平台补丁补回 include/uapi/linux/atmsvc.h —— 这是"正统"修法：
+#          headers_install 会把 include/uapi/** 全部导出到 user_headers，
+#          正是 linux-atm 找头文件的地方。补丁落在 target/linux/msm89xx/patches-7.3/，
+#          若仓库漏提交，下面会就地生成（从刚写好的 compat 头派生）。
+#     [备] 同时把同一份头放进 linux-atm 包内 compat/linux/ 并追加一条 -I，
+#          即使平台补丁因故未生效，包也能自行找到头文件。
+#     依赖的 atmapi.h / atm.h / atmioc.h 在 7.3 里都还在（atm_kptr_t、
+#     __ATM_API_ALIGN、sockaddr_atmsvc、ATMIOC_SPECIAL 均健在），可原样复用。
 ATM_DIR=package/network/utils/linux-atm
 if [ -d "$ATM_DIR" ]; then
 	mkdir -p "$ATM_DIR/compat/linux"
@@ -196,6 +203,28 @@ struct atmsvc_msg {
 #endif
 ATMSVC_EOF
 	sed -i 's/\r$//' "$ATM_DIR/compat/linux/atmsvc.h"
+
+	# [主修复] 在内核树补回 include/uapi/linux/atmsvc.h（正交修法，优先于包内 compat）。
+	#     headers_install 会把 include/uapi/** 全部导出到 user_headers，
+	#     而 linux-atm 正是用 -I$(LINUX_DIR)/user_headers/include 找头文件，
+	#     所以补回内核树后包自然能编过。补丁落在 target/linux/msm89xx/patches-7.3/，
+	#     即使仓库漏提交该补丁，这里也从刚写好的 compat 头就地生成，保证 self-heal。
+	PATCH_DIR=target/linux/msm89xx/patches-7.3
+	PATCH_FILE="$PATCH_DIR/0100-restore-uapi-linux-atmsvc-header.patch"
+	if [ -f "$PATCH_FILE" ]; then
+		echo "✅ 内核补丁 $PATCH_FILE 已在仓库中，主修复就绪"
+	else
+		mkdir -p "$PATCH_DIR"
+		{
+			printf -- '--- /dev/null\t1970-01-01 08:00:00.000000000 +0800\n'
+			printf -- '+++ b/include/uapi/linux/atmsvc.h\t2026-10-03 12:00:00.000000000 +0800\n'
+			printf -- '@@ -0,0 +1,%d @@\n' "$(wc -l < "$ATM_DIR/compat/linux/atmsvc.h")"
+			sed 's/^/+/' "$ATM_DIR/compat/linux/atmsvc.h"
+		} > "$PATCH_FILE"
+		sed -i 's/\r$//' "$PATCH_FILE"
+		echo "✅ 内核补丁 $PATCH_FILE 已就地生成（仓库漏提交时自修复）"
+	fi
+
 	if [ -f "$ATM_DIR/Makefile" ]; then
 		if ! grep -q "linux-atm/compat" "$ATM_DIR/Makefile"; then
 			printf '\n# 7.3 移除了 include/uapi/linux/atmsvc.h，用包内 compat 目录补回（见 diy-part1.sh）\nTARGET_CFLAGS += -I$(TOPDIR)/%s/compat\n' "$ATM_DIR" >> "$ATM_DIR/Makefile"
