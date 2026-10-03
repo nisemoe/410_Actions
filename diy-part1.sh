@@ -146,6 +146,40 @@ else
 	echo "::warning::toolchain/kernel-headers/patches 不存在，7.3 UAPI 补丁不会被应用到工具链头文件！"
 fi
 
+# 4d) Linux 7.3 重构了 crypto/ 目录，一批模块改了名：
+#       crypto/sha3_generic.ko     -> crypto/sha3.ko
+#       crypto/blake2b_generic.ko  -> crypto/blake2b.ko
+#       crypto/aes_generic.ko      -> crypto/aes.ko
+#       （sm3_generic/sm3 连 Kconfig 符号都改了，那种情况 defconfig 会自动丢包，不用管）
+#     OpenWrt 的 package/kernel/linux/modules/crypto.mk 里 FILES/AUTOLOAD 还是旧名字，
+#     安装阶段会直接报 ERROR: module 'xxx' is missing. 让整个 package/kernel/linux 红掉。
+#     只在 7.3 构建时改 —— 其它工作流还是 6.x，模块名不能动。
+IS73=""
+echo "${ALL_DEVICES:-}" | grep -q "7\.3" && IS73=1
+if [ -z "$IS73" ] && [ -f target/linux/msm89xx/Makefile ] \
+	&& grep -q "KERNEL_TESTING_PATCHVER:=7.3" target/linux/msm89xx/Makefile; then
+	IS73=1
+fi
+CM=package/kernel/linux/modules/crypto.mk
+if [ -n "$IS73" ]; then
+	if [ -f "$CM" ]; then
+		sed -i \
+			-e 's#/crypto/sha3_generic\.ko#/crypto/sha3.ko#g' \
+			-e 's#AutoProbe,sha3_generic#AutoProbe,sha3#g' \
+			-e 's#/crypto/blake2b_generic\.ko#/crypto/blake2b.ko#g' \
+			-e 's#AutoProbe,blake2b_generic#AutoProbe,blake2b#g' \
+			-e 's#/crypto/aes_generic\.ko#/crypto/aes.ko#g' \
+			-e 's#AutoProbe,aes_generic#AutoProbe,aes#g' \
+			"$CM"
+		echo "✅ 已按 Linux 7.3 的 crypto 模块改名修正 $CM："
+		grep -nE "sha3|blake2b|aes_generic" "$CM" | head -20
+	else
+		echo "::warning::找不到 $CM —— 7.3 crypto 模块改名修正未执行"
+	fi
+else
+	echo "ℹ️ 非 7.3 构建（ALL_DEVICES='${ALL_DEVICES:-}'），跳过 crypto 模块改名修正"
+fi
+
 # 5) 兜底：万一文件是 Windows 编辑器上传带上的 CRLF，make/patch 都会出问题，统一清掉行尾 \r
 for f in target/linux/generic/kernel-7.3 \
 	target/linux/generic/config-7.3 \
