@@ -330,7 +330,7 @@ jobs:
         echo -e "$(nproc) thread compile"
 
         set +e
-        make -j$(nproc) 2>&1 | tee build.log
+        make -j$(nproc) -k 2>&1 | tee build.log
         BUILD_EXIT=${PIPESTATUS[0]}
         set -e
 
@@ -353,18 +353,26 @@ jobs:
             echo "::warning::有 kmod 因内核配置不可用被跳过：config-7.3 是从 6.18 复制的，7.3 里改名/删除的符号会被 olddefconfig 丢掉"
           fi
 
+          echo "----- 失败的包汇总（本轮全部，而不是只看到第一个）-----"
+          grep -oE "ERROR: [^ ]+ failed to build" build.log | sed 's/^ERROR: //' | sort -u | tee build_failed_pkgs.txt
+          echo "----- module is missing 汇总 -----"
+          grep -oE "ERROR: module '[^']+' is missing" build.log | sort -u | tee -a build_failed_pkgs.txt
+          echo "----- 首个真正的编译错误（带上下文）-----"
+          grep -nE "error:|fatal error:|No such file or directory|Error [0-9]" build.log | head -n 40
           tail -n 400 build.log > build_tail.txt
           grep -nE "Error [0-9]|error:|ERROR:|\*\*\*|No rule to make target" build.log | tail -n 200 > build_errors.txt
 
           echo "⚠️ 并行编译失败，切换到详细模式..."
           set +e
-          make -j8 V=s 2>&1 | tee build_verbose.log
+          make -j8 V=s -k 2>&1 | tee build_verbose.log
           VERBOSE_EXIT=${PIPESTATUS[0]}
           set -e
           if [ $VERBOSE_EXIT -ne 0 ]; then
             echo "::group::❌ 详细模式也失败（退出码 $VERBOSE_EXIT）"
             tail -n 200 build_verbose.log
             echo "::endgroup::"
+            grep -oE "ERROR: [^ ]+ failed to build" build_verbose.log | sed 's/^ERROR: //' | sort -u | tee build_failed_pkgs.txt
+            grep -oE "ERROR: module '[^']+' is missing" build_verbose.log | sort -u | tee -a build_failed_pkgs.txt
             tail -n 400 build_verbose.log > build_tail.txt
             grep -nE "Error [0-9]|error:|ERROR:|\*\*\*|No rule to make target" build_verbose.log | tail -n 200 > build_errors.txt
             echo "::error::编译失败 —— 看上面的日志尾部，或下载 build-log 工件里的 build_errors.txt"
@@ -392,6 +400,7 @@ jobs:
         path: |
           openwrt/build_tail.txt
           openwrt/build_errors.txt
+          openwrt/build_failed_pkgs.txt
         if-no-files-found: ignore
 
     - name: df -hT
