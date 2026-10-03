@@ -1,0 +1,92 @@
+From: OpenWrt 7.3-rc5 bring-up <noreply@example.com>
+Subject: uapi: keep 128-bit types usable when __SIZEOF_INT128__ is hidden
+
+Linux 7.3 switched the arm64 UAPI from __uint128_t to __u128.  __u128 is
+declared by include/uapi/linux/types.h only under #ifdef __SIZEOF_INT128__,
+which the OpenWrt musl cross toolchain does not expose to user space, so
+packages such as libbpf fail with "unknown type name '__u128'".
+
+Revert the arm64 UAPI headers to the proven __uint128_t spelling and add a
+fallback declaration for the case where __SIZEOF_INT128__ is not defined.
+
+diff --git a/arch/arm64/include/uapi/asm/ptrace.h b/arch/arm64/include/uapi/asm/ptrace.h
+--- a/arch/arm64/include/uapi/asm/ptrace.h
++++ b/arch/arm64/include/uapi/asm/ptrace.h
+@@ -93,7 +93,7 @@
+ };
+ 
+ struct user_fpsimd_state {
+-	__u128		vregs[32];
++	__uint128_t		vregs[32];
+ 	__u32		fpsr;
+ 	__u32		fpcr;
+ 	__u32		__reserved[2];
+@@ -258,14 +258,14 @@
+ /* pointer authentication keys (NT_ARM_PACA_KEYS, NT_ARM_PACG_KEYS) */
+ 
+ struct user_pac_address_keys {
+-	__u128	apiakey;
+-	__u128	apibkey;
+-	__u128	apdakey;
+-	__u128	apdbkey;
++	__uint128_t	apiakey;
++	__uint128_t	apibkey;
++	__uint128_t	apdakey;
++	__uint128_t	apdbkey;
+ };
+ 
+ struct user_pac_generic_keys {
+-	__u128	apgakey;
++	__uint128_t	apgakey;
+ };
+ 
+ /* ZA state (NT_ARM_ZA) */
+diff --git a/arch/arm64/include/uapi/asm/sigcontext.h b/arch/arm64/include/uapi/asm/sigcontext.h
+--- a/arch/arm64/include/uapi/asm/sigcontext.h
++++ b/arch/arm64/include/uapi/asm/sigcontext.h
+@@ -78,7 +78,7 @@
+ 	struct _aarch64_ctx head;
+ 	__u32 fpsr;
+ 	__u32 fpcr;
+-	__u128 vregs[32];
++	__uint128_t vregs[32];
+ };
+ 
+ /*
+@@ -266,8 +266,8 @@
+  *	-	----				-----------
+  *	REGS					the entire SVE context
+  *
+- *	ZREGS	__u128[SVE_NUM_ZREGS][vq]	all Z-registers
+- *	ZREG	__u128[vq]			individual Z-register Zn
++ *	ZREGS	__uint128_t[SVE_NUM_ZREGS][vq]	all Z-registers
++ *	ZREG	__uint128_t[vq]			individual Z-register Zn
+  *
+  *	PREGS	uint16_t[SVE_NUM_PREGS][vq]	all P-registers
+  *	PREG	uint16_t[vq]			individual P-register Pn
+diff --git a/include/uapi/linux/types.h b/include/uapi/linux/types.h
+--- a/include/uapi/linux/types.h
++++ b/include/uapi/linux/types.h
+@@ -13,9 +13,22 @@
+ 
+ #include <linux/posix_types.h>
+ 
++#ifndef __SIZEOF_INT128__
++/*
++ * Linux 7.3 replaced the __uint128_t spelling used by the arm64 UAPI with
++ * __u128, which is only declared when the compiler exposes
++ * __SIZEOF_INT128__.  Cross toolchains built for musl do not expose it
++ * while compiling user space, so __u128 ends up undefined and every
++ * package including <asm/ptrace.h> fails.  Provide the type with the
++ * pre-7.3 compatible spelling in that case.
++ */
++__extension__ typedef __int128 __s128 __attribute__((aligned(16)));
++__extension__ typedef unsigned __int128 __u128 __attribute__((aligned(16)));
++#else
+ #ifdef __SIZEOF_INT128__
+ typedef __signed__ __int128 __s128 __attribute__((aligned(16)));
+ typedef unsigned __int128 __u128 __attribute__((aligned(16)));
++#endif
+ #endif
+ 
+ /*
