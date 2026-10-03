@@ -191,6 +191,16 @@ jobs:
         echo "===== 实际解析出的内核版本 ====="
         grep -m1 -E "^Linux-Version:" tmp/.targetinfo 2>/dev/null || echo "(tmp/.targetinfo 未生成)"
 
+        # ATM：7.3 删了 UAPI 头 include/uapi/linux/atmsvc.h，linux-atm 会用
+        # -I$(LINUX_DIR)/user_headers/include 去要它。diy-part1.sh 第 5b 步
+        # 会补一个 compat 头 + -I，这里确认它确实落盘了，免得又炸在同一个地方。
+        echo "===== ATM 兼容头（linux/atmsvc.h）====="
+        grep -E "^CONFIG_PACKAGE_(linux-atm|ppp-mod-pppoa|br2684ctl)=" .config \
+          || echo "(ATM 相关包均未选中，但 linux-atm 仍可能作为构建依赖被拉进来)"
+        ls -l package/network/utils/linux-atm/compat/linux/atmsvc.h 2>/dev/null \
+          || echo "::warning::没有 compat/linux/atmsvc.h，若 linux-atm 被编到就会 fatal error"
+        grep -n "linux-atm/compat" package/network/utils/linux-atm/Makefile 2>/dev/null || true
+
         # 硬校验：不满足就直接红掉，绝不静默退化成 6.18
         if ! grep -q "^CONFIG_TESTING_KERNEL=y" .config; then
           echo "::error::.config 没有 CONFIG_TESTING_KERNEL=y —— defconfig 把它丢了（HAS_TESTING_KERNEL 未被 select），本次会退化成 6.18"
