@@ -355,7 +355,7 @@ jobs:
           echo "::group::🔁 逐个复现失败包（make -j1 V=s，完整错误可见）"
           REPRO_ERR=0
           if [ -s build_failed_pkgs.txt ]; then
-            for p in $(grep -oE '^[^ ]+ failed to build' build_failed_pkgs.txt | awk '{print $1}' | sort -u); do
+            for p in $( { grep -oE '^[^ ]+ failed to build' build_failed_pkgs.txt | awk '{print $1}'; echo package/kernel/linux; } | sort -u); do
         slug=$(echo "$p" | tr '/' '_')
         echo "########## 复现 $p ##########"
         make -j1 V=s -C "$p" compile > "repro_${slug}.log" 2>&1 || true
