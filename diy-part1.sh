@@ -116,6 +116,24 @@ if [ ! -d target/linux/msm89xx/patches-7.3 ] || [ -z "$(ls -A target/linux/msm89
 	fi
 fi
 
+# 4b) 补丁目录卫生：patches-7.3 下只要混进任何非 .patch 的文件（例如误上传的 "1"），
+#     quilt/patch 都会把它当成补丁去应用，然后报
+#       patch: **** Only garbage was found in the patch input.
+#     整个 target/linux 编译直接红掉，而错误信息里根本看不出是哪个文件。
+#     这里在打补丁之前先清一遍，并把删掉的文件名打进日志。
+if [ -d target/linux/msm89xx/patches-7.3 ]; then
+	junk=$(find target/linux/msm89xx/patches-7.3 -maxdepth 1 -type f ! -name '*.patch' 2>/dev/null)
+	if [ -n "$junk" ]; then
+		echo "::warning::patches-7.3 中发现非补丁文件，已删除："
+		echo "$junk"
+		find target/linux/msm89xx/patches-7.3 -maxdepth 1 -type f ! -name '*.patch' -delete
+	else
+		echo "✅ patches-7.3 目录干净（无非 .patch 文件）"
+	fi
+	echo "----- patches-7.3 内容 -----"
+	ls -1 target/linux/msm89xx/patches-7.3 || true
+fi
+
 # 5) 兜底：万一文件是 Windows 编辑器上传带上的 CRLF，make/patch 都会出问题，统一清掉行尾 \r
 for f in target/linux/generic/kernel-7.3 \
 	target/linux/generic/config-7.3 \
