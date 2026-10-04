@@ -354,17 +354,45 @@ jobs:
           # 复现必须从顶层调用 `make <pkg>/compile`。
           # `make -C <pkg> compile` 会因为 TOPDIR/SCRIPT_DIR 为空而立刻失败
           # （/bin/sh: 1: /kconfig.pl: not found），什么都诊断不出来。
-          echo "::group::🔁 复现失败包（顶层调用 make -j1 V=s <pkg>/compile）"
+          # 加 -k：package/kernel/linux 里有 90 个 kmod 子包，不加 -k 只能看到第一个失败的，
+          # 加 -k 才能一轮拿到全部失败（MAKEFLAGS 会把 k 带进子 make）。
+          echo "::group::🔁 复现失败包（顶层调用 make -j1 V=s -k <pkg>/compile）"
           REPRO_ERR=0
           PKGS=$( { grep -oE '^[^ ]+ failed to build' build_failed_pkgs.txt | awk '{print $1}'; echo package/kernel/linux; } | sort -u )
           echo "待复现：$PKGS"
           for p in $PKGS; do
             slug=$(echo "$p" | tr '/' '_')
             echo "########## 复现 $p ##########"
-            make -j1 V=s "$p/compile" > "repro_${slug}.log" 2>&1 || true
-            echo "----- $p 复现日志（最后 500 行）-----"
-            tail -n 500 "repro_${slug}.log" || true
+            make -j1 V=s -k "$p/compile" > "repro_${slug}.log" 2>&1 || true
+            echo "----- $p 复现日志（最后 900 行）-----"
+            tail -n 900 "repro_${slug}.log" || true
             if grep -qE "Error [0-9]|ERROR:|error:|failed to build|is missing|No rule to make target" "repro_${slug}.log"; then REPRO_ERR=1; fi
+          done
+          echo "::endgroup::"
+
+          # 把“生效的内核配置”和“kmod 包实际装了什么”抓下来，
+          # 这样 lib/crypto/lib*.ko 这类依赖问题一次就能定论（不用再靠推理）。
+          echo "::group::🔬 内核 crypto 配置 / modules.builtin / modules.d 现场"
+          KCFG=$(ls -d build_dir/target-*/linux-*/linux-*/.config 2>/dev/null | head -1)
+          echo "内核 .config: ${KCFG:-<未找到>}"
+          if [ -n "$KCFG" ]; then
+            echo "----- CONFIG_CRYPTO_LIB_* （=y 表示编进 vmlinux，=m 表示独立 lib*.ko）-----"
+            grep -E "^CONFIG_CRYPTO_LIB_|^# CONFIG_CRYPTO_LIB_" "$KCFG" | sort || true
+            echo "----- 相关 CRYPTO_* 主符号 -----"
+            grep -E "^CONFIG_CRYPTO_(BLAKE2B|SHA1|SHA3|SHA512|GCM|MD5|DES|ARC4|GF128MUL|GF128HASH|DRBG|JITTERENTROPY)=" "$KCFG" | sort || true
+            LK=$(dirname "$KCFG")
+            echo "----- modules.builtin 里的 lib/crypto -----"
+            grep -E "lib/crypto/" "$LK/modules.builtin" | sort || echo "(modules.builtin 里没有 lib/crypto 条目)"
+          fi
+          echo "----- package/kernel/linux/modules/crypto.mk 里 lib/crypto 相关行 -----"
+          grep -nE "lib/crypto/|AutoLoad,09,(blake2b|sha3)" package/kernel/linux/modules/crypto.mk || true
+          echo "----- 已生成的 kmod-crypto-* apk -----"
+          ls -l bin/targets/*/*/packages/kmod-crypto-*.apk 2>/dev/null | head -40 || echo "(没有 kmod-crypto-*.apk)"
+          echo "----- 已安装的 kmod-crypto-* /etc/modules.d -----"
+          for d in build_dir/target-*/linux-*/packages/ipkg-*/kmod-crypto-*/etc/modules.d; do
+            [ -d "$d" ] || continue
+            echo "== $d"
+            for f in "$d"/*; do echo "  $(basename "$f"): $(tr '\n' ' ' < "$f")"; done
           done
           echo "::endgroup::"
 
