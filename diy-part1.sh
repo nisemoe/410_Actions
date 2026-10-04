@@ -214,6 +214,141 @@ else
 	echo "ℹ️ 非 7.3 构建（ALL_DEVICES='${ALL_DEVICES:-}'），跳过 raid6/xor 路径修正"
 fi
 
+# 4f) Linux 7.3 把 lib/crypto 拆成了一大批独立模块，并且把 crypto/*.c 改成薄壳：
+#       crypto/Kconfig:  CRYPTO_BLAKE2B select CRYPTO_LIB_BLAKE2B
+#                        CRYPTO_SHA3    select CRYPTO_LIB_SHA3
+#                        CRYPTO_SHA1    select CRYPTO_LIB_SHA1
+#                        CRYPTO_GCM     select CRYPTO_LIB_GF128HASH
+#                        CRYPTO_DRBG    select CRYPTO_LIB_SHA512
+#                        CRYPTO_JITTERENTROPY select CRYPTO_LIB_SHA3
+#       lib/crypto/Makefile: obj-$(CONFIG_CRYPTO_LIB_BLAKE2B) += libblake2b.o
+#                            obj-$(CONFIG_CRYPTO_LIB_SHA3)    += libsha3.o   ... 等等
+#     于是 crypto/*.ko 里出现对 lib/crypto/lib*.ko 的**未解析符号**。OpenWrt 的
+#     include/package-ipkg.mk 依赖检查只看“同一个 ipkg 里装了哪些 .ko”，
+#     round-12 实测直接红掉（topdir 复现日志 repro_package_kernel_linux.log）：
+#         Package kmod-crypto-blake2b is missing dependencies for the following libraries:
+#         libblake2b.ko
+#         make[2]: *** [modules/crypto.mk:90: .../kmod-crypto-blake2b-7.3_rc5-r1.apk] Error 1
+#     修法：把对应的 lib/crypto/lib*.ko 一起装进同一个包。
+#     关键：用 $(if $(filter m,$(CONFIG_CRYPTO_LIB_*)),...) 包住。
+#     include/kernel.mk 里有
+#         ifeq ($(DUMP)$(TARGET_BUILD),)
+#           -include $(LINUX_DIR)/.config
+#         endif
+#     内核配置符号在 kmod 包里就是普通 make 变量（KernelPackage 的可用性判断就是靠这个），
+#     所以：lib 真的以 =m 构建 -> 加进去（否则会缺依赖）；=y 编进 vmlinux -> 自动跳过
+#     （否则会 "ERROR: module '...' is missing."）。两种情形都安全。
+#     顺带：4d 只改了 FILES 和 AutoProbe，AUTOLOAD 里残留的旧模块名也要一起改，
+#     否则 /etc/modules.d/09-crypto-blake2b 里会写 blake2b_generic，开机 modprobe 失败。
+#     只在 7.3 构建时改 —— 其它工作流还是 6.x，不能动。
+if [ -n "$IS73" ]; then
+	if [ -f "$CM" ]; then
+		python3 - "$CM" <<'PY_CRYPTO73'
+import re
+import sys
+
+path = sys.argv[1]
+src = open(path, encoding='utf-8', errors='surrogateescape').read()
+original = src
+
+failures = []
+
+
+def guard(sym, rel):
+    return '$(if $(filter m,$(CONFIG_%s)),$(LINUX_DIR)/%s)' % (sym, rel)
+
+
+def sub(label, pattern, repl):
+    global src
+    src, n = re.subn(pattern, lambda m, r=repl: r, src, count=1)
+    if not n:
+        failures.append(label)
+
+
+def wrap(label, literal, sym, rel):
+    global src
+    if literal not in src:
+        failures.append(label)
+        return
+    src = src.replace(literal, guard(sym, rel), 1)
+
+
+# --- packages that must now also ship a lib/crypto helper module -------------
+sub('crypto-blake2b FILES',
+    r'(?m)^  FILES:=\$\(LINUX_DIR\)/crypto/blake2b(?:_generic)?\.ko\n',
+    '  FILES:= \\\n'
+    '\t$(LINUX_DIR)/crypto/blake2b.ko \\\n'
+    '\t%s\n' % guard('CRYPTO_LIB_BLAKE2B', 'lib/crypto/libblake2b.ko'))
+
+sub('crypto-blake2b AUTOLOAD',
+    r'(?m)^  AUTOLOAD:=\$\(call AutoLoad,09,blake2b(?:_generic)?\)\n',
+    '  AUTOLOAD:=$(call AutoLoad,09,blake2b)\n')
+
+sub('crypto-sha3 FILES',
+    r'(?m)^  FILES:=\$\(LINUX_DIR\)/crypto/sha3(?:_generic)?\.ko\n',
+    '  FILES:= \\\n'
+    '\t$(LINUX_DIR)/crypto/sha3.ko \\\n'
+    '\t%s\n' % guard('CRYPTO_LIB_SHA3', 'lib/crypto/libsha3.ko'))
+
+sub('crypto-sha3 AUTOLOAD',
+    r'(?m)^  AUTOLOAD:=\$\(call AutoLoad,09,sha3(?:_generic)?\)\n',
+    '  AUTOLOAD:=$(call AutoLoad,09,sha3)\n')
+
+sub('crypto-sha1 FILES',
+    r'(?m)^  FILES:=\$\(LINUX_DIR\)/crypto/sha1(?:_generic)?\.ko(?:@[\w.]+)? \\\n'
+    r'\t\$\(LINUX_DIR\)/crypto/sha1\.ko(?:@[\w.]+)?\n',
+    '  FILES:= \\\n'
+    '\t$(LINUX_DIR)/crypto/sha1_generic.ko@lt6.18 \\\n'
+    '\t$(LINUX_DIR)/crypto/sha1.ko@ge6.18 \\\n'
+    '\t%s\n' % guard('CRYPTO_LIB_SHA1', 'lib/crypto/libsha1.ko'))
+
+sub('crypto-gcm FILES',
+    r'(?m)^  FILES:=\$\(LINUX_DIR\)/crypto/gcm\.ko\n',
+    '  FILES:= \\\n'
+    '\t$(LINUX_DIR)/crypto/gcm.ko \\\n'
+    '\t%s\n' % guard('CRYPTO_LIB_GF128HASH', 'lib/crypto/libgf128hash.ko'))
+
+# --- pre-existing unconditional lib/crypto entries: guard them as well -------
+wrap('crypto-arc4 libarc4.ko',
+     '$(LINUX_DIR)/lib/crypto/libarc4.ko',
+     'CRYPTO_LIB_ARC4', 'lib/crypto/libarc4.ko')
+
+wrap('crypto-des libdes.ko',
+     '$(LINUX_DIR)/lib/crypto/libdes.ko',
+     'CRYPTO_LIB_DES', 'lib/crypto/libdes.ko')
+
+wrap('crypto-gf128 gf128mul.ko',
+     '$(LINUX_DIR)/lib/crypto/gf128mul.ko',
+     'CRYPTO_LIB_GF128MUL', 'lib/crypto/gf128mul.ko')
+
+wrap('crypto-md5 libmd5.ko',
+     '$(LINUX_DIR)/lib/crypto/libmd5.ko@ge6.18',
+     'CRYPTO_LIB_MD5', 'lib/crypto/libmd5.ko')
+
+wrap('crypto-sha512 libsha512.ko',
+     '$(LINUX_DIR)/lib/crypto/libsha512.ko@ge6.18',
+     'CRYPTO_LIB_SHA512', 'lib/crypto/libsha512.ko')
+
+if failures:
+    sys.stderr.write('::error::7.3 crypto.mk patch did not match: %s\n' % ', '.join(failures))
+    sys.exit(1)
+
+if src == original:
+    sys.stderr.write('::error::7.3 crypto.mk patch produced no change\n')
+    sys.exit(1)
+
+open(path, 'w', encoding='utf-8', errors='surrogateescape').write(src)
+print('OK: patched %s' % path)
+PY_CRYPTO73
+		echo "✅ 已按 Linux 7.3 的 lib/crypto 拆分补全 $CM："
+		grep -nE "lib/crypto/lib(blake2b|sha3|sha1|gf128hash|arc4|des|md5|sha512)|lib/crypto/gf128mul|AutoLoad,09,(blake2b|sha3)\)" "$CM" | head -40 || true
+	else
+		echo "::warning::找不到 $CM —— 7.3 lib/crypto 依赖修正未执行"
+	fi
+else
+	echo "ℹ️ 非 7.3 构建（ALL_DEVICES='${ALL_DEVICES:-}'），跳过 lib/crypto 依赖修正"
+fi
+
 # 5) 兜底：万一文件是 Windows 编辑器上传带上的 CRLF，make/patch 都会出问题，统一清掉行尾 \r
 for f in target/linux/generic/kernel-7.3 \
 	target/linux/generic/config-7.3 \
