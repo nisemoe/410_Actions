@@ -799,6 +799,47 @@ for path in ('package/kernel/linux/modules/netsupport.mk',
 PY_ARC4_OWNER
 fi
 
+# 4n) Linux 7.3 的 dtc 删掉了 graph_child_address 这个检查。
+#     v6.18 scripts/dtc/checks.c 里 check_graph_child_address() 还在（1897/1920 行），
+#     v7.3-rc5 的 check_table[] 已经只剩
+#         &graph_nodes, &graph_port, &graph_endpoint,
+#     即该检查被上游移除。而 immortalwrt 的 include/image.mk 仍无条件把
+#     -Wno-graph_child_address 塞进 DTC_WARN_FLAGS（同时喂给 DTC_FLAGS 和
+#     DTCO_FLAGS），于是 target/linux install 阶段编 DTB 时直接：
+#         FATAL ERROR: Unrecognized check name "graph_child_address"
+#         make[5]: *** [Makefile:42: .../image-msm8916-xinxun-wf2.dtb] Error 1
+#     这是 r18 的**唯一**失败点（package/install 已全绿，404 个 apk 都已打好）。
+#
+#     immortalwrt 自己在 package/boot/uboot-mediatek/patches/
+#     008-scripts-Makefile.lib-drop-Wno-graph_child_address.patch 里就是这么修的：
+#     "Older dtc versions which still implement the check will at most emit
+#      warnings for affected device trees." —— 删掉这个 -Wno- 只是少关一个
+#     警告，绝不会让老 dtc 报错，所以无条件删是安全的。
+#
+#     做法：全树扫描，凡是出现该 flag 的地方都处理掉。它通常是独立的一行
+#     （空格缩进 + 续行反斜杠），整行删除可以保持 DTC_WARN_FLAGS 续行链完整；
+#     若它跟别的 flag 挤在同一行，则用第二条表达式剥掉 token，
+#     第三条表达式再清掉可能因此产生的"光秃秃的反斜杠续行"。
+if [ -n "$IS73" ]; then
+	DTC_HITS=$(grep -rl -- '-Wno-graph_child_address' include target scripts package Makefile 2>/dev/null || true)
+	if [ -n "$DTC_HITS" ]; then
+		for f in $DTC_HITS; do
+			before=$(grep -c -- '-Wno-graph_child_address' "$f" || true)
+			sed -i -e '/^[[:space:]]*-Wno-graph_child_address[[:space:]]*\\$/d' \
+				-e 's/[[:space:]]*-Wno-graph_child_address//g' \
+				-e '/^ *\\$/d' "$f"
+			after=$(grep -c -- '-Wno-graph_child_address' "$f" || true)
+			echo "✅ [4n] $f: 移除 -Wno-graph_child_address ($before -> $after)"
+		done
+	else
+		echo "::warning::[4n] 未发现 -Wno-graph_child_address（include/image.mk 可能已变）"
+	fi
+	if [ -f include/image.mk ]; then
+		LEFT=$(grep -o -- '-Wno-[a-z_]*' include/image.mk | sort -u | tr '\n' ' ' || true)
+		echo "[4n] include/image.mk 剩余 DTC flags: $LEFT"
+	fi
+fi
+
 # 5) 兜底：万一文件是 Windows 编辑器上传带上的 CRLF，make/patch 都会出问题，统一清掉行尾 \r
 for f in target/linux/generic/kernel-7.3 \
 	target/linux/generic/config-7.3 \
