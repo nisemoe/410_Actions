@@ -44,28 +44,71 @@ if [ ! -e package/luci.mk ] && [ -e feeds/luci/luci.mk ]; then
 	echo "✅ 已建 package/luci.mk -> feeds/luci/luci.mk"
 fi
 
-# mosdns 打包冲突修复（版本无关，覆盖旧版 feed 的多个冲突文件）
-# luci-app-mosdns 依赖 mosdns（+mosdns），二者必然同时被安装。旧版 mosdns 核心包
-# （如 5.3.3-r1）通过 root/ 或 files/ 自带 /etc/init.d/mosdns、/etc/config/mosdns、
-# /etc/mosdns/*、/usr/share/mosdns/* 等，与 luci-app-mosdns 自带的重名 -> opkg 报
-# “trying to overwrite ... owned by mosdns” 而构建失败。
-# 新版 mosdns 核心包（如 5.3.4+，GoBinPackage）只含二进制（无 root/），此时
-# luci-app-mosdns 是这些文件的唯一提供方，本就不应删除。
-# 因此：只删 luci-app-mosdns/root 下、且 mosdns 核心包（root/ 或 files/）也提供的文件，
-# 交集为空时不删任何东西，两种 feed 版本都安全。
-mosdns_core=feeds/small/mosdns
-luci_mosdns=feeds/small/luci-app-mosdns/root
-if [ -d "$luci_mosdns" ]; then
-	while IFS= read -r f; do
-		rel="${f#"$luci_mosdns"/}"
-		if [ -e "$mosdns_core/root/$rel" ] || [ -e "$mosdns_core/files/$rel" ]; then
-			rm -f "$f"
-			echo "✅ 移除冲突文件 luci-app-mosdns/root/$rel（mosdns 核心包已提供）"
-		fi
-	done < <(cd "$luci_mosdns" && find . -type f)
+# mosdns 打包冲突修复（v2 —— 2026-10-04 修正）
+# 旧实现只比对 feeds/small/mosdns/{root,files}，但 kenzok8/small 的 mosdns 目录
+# **只有 Makefile + patches/**（没有 root/、没有 files/），而真正提供
+# /etc/init.d/mosdns 的是 feeds/packages/net/mosdns —— 它是在 Makefile 里用
+#     $(INSTALL_BIN) $(PKG_BUILD_DIR)/scripts/openwrt/mosdns-init-openwrt $(1)/etc/init.d/mosdns
+# 装出来的。所以按"目录比对"永远匹配不到，旧逻辑一直静默空转（没有任何输出），
+# 结果 r17 在 install 阶段报：
+#     ERROR: luci-app-mosdns-1.7.14-r1: trying to overwrite etc/init.d/mosdns owned by mosdns-5.3.3-r1.
+#
+# 保留哪一个：luci-app-mosdns 自带的 /etc/init.d/mosdns 是**完整版**
+# （procd + 读 uci mosdns.config.configfile + 用 /usr/share/mosdns/mosdns.uc，
+#  被 LuCI 前端和 rpcd 后端依赖），核心包那个只是上游简单脚本（读 /etc/mosdns/config.yaml）。
+# 若让核心版胜出，LuCI 里改的配置不会被 mosdns 加载 —— 属于功能回退。
+# 因此：删掉**核心包 Makefile 里安装 /etc/init.d/mosdns 的那一行**，让 LuCI 版成为唯一提供者。
+MOSDNS_MK=feeds/packages/net/mosdns/Makefile
+if [ -f "$MOSDNS_MK" ]; then
+	if grep -q 'INSTALL_BIN.*etc/init\.d/mosdns' "$MOSDNS_MK"; then
+		sed -i '/INSTALL_BIN.*etc\/init\.d\/mosdns/d' "$MOSDNS_MK"
+		echo "✅ 已移除核心 mosdns 包对 /etc/init.d/mosdns 的安装，改用 luci-app-mosdns 的完整版"
+	else
+		echo "ℹ️ 核心 mosdns 包未安装 /etc/init.d/mosdns，无需处理"
+	fi
 else
-	echo "ℹ️ 未找到 feeds/small/luci-app-mosdns/root，跳过 mosdns 冲突修复"
+	echo "ℹ️ 未找到 $MOSDNS_MK，跳过 mosdns 冲突修复"
 fi
+
+# 兜底：万一还有别的重名文件，把 luci-app-mosdns/root 下与 mosdns 核心包
+# 实际安装路径重名的文件也清掉（安装路径从核心包 Makefile 的 $(1)/... 解析得到，
+# 这样即使核心包把文件写在 Makefile 里而不是 root/ 目录里，也能被发现）。
+python3 - <<'PY_MOSDNS'
+import io
+import os
+import re
+
+cores = ["feeds/packages/net/mosdns", "feeds/small/mosdns"]
+luci_root = "feeds/small/luci-app-mosdns/root"
+
+paths = set()
+for d in cores:
+    mk = os.path.join(d, "Makefile")
+    if os.path.isfile(mk):
+        src = io.open(mk, encoding="utf-8", errors="replace").read()
+        for m in re.finditer(r'\$\(1\)/([A-Za-z0-9_./@+-]+)', src):
+            paths.add(m.group(1))
+    for sub in ("root", "files"):
+        base = os.path.join(d, sub)
+        if os.path.isdir(base):
+            for dp, _dn, fns in os.walk(base):
+                for fn in fns:
+                    paths.add(os.path.relpath(os.path.join(dp, fn), base))
+
+removed = 0
+if os.path.isdir(luci_root):
+    for dp, _dn, fns in os.walk(luci_root):
+        for fn in fns:
+            full = os.path.join(dp, fn)
+            rel = os.path.relpath(full, luci_root)
+            if rel in paths:
+                os.remove(full)
+                print("  removed luci-app-mosdns/root/%s (core also provides it)" % rel)
+                removed += 1
+    print("mosdns 兜底清理：核心包提供 %d 个路径，移除重名文件 %d 个" % (len(paths), removed))
+else:
+    print("ℹ️ 未找到 %s，跳过兜底清理" % luci_root)
+PY_MOSDNS
 
 # 北大源
 cp -r "$GITHUB_WORKSPACE/scripts/files-8916" "$GITHUB_WORKSPACE/openwrt/files"
