@@ -329,6 +329,34 @@ wrap('crypto-sha512 libsha512.ko',
      '$(LINUX_DIR)/lib/crypto/libsha512.ko@ge6.18',
      'CRYPTO_LIB_SHA512', 'lib/crypto/libsha512.ko')
 
+# --- 4g) Linux 7.3 删掉了 crypto/ghash-generic.c ---------------------------------
+#     GHASH / POLYVAL 搬进了 lib/crypto/libgf128hash.ko（已经由上面的
+#     kmod-crypto-gcm 一起装走）。麻烦在于 crypto-ghash 的 KCONFIG 是
+#         CONFIG_CRYPTO_GHASH          <- 7.3 里彻底不存在
+#         CONFIG_CRYPTO_GHASH_ARM_CE   <- 7.3 里还在（arch/arm/crypto/Kconfig）
+#     scripts/package-metadata.pl 的 gen_kconfig_overrides() 里：
+#         if ($config{"CONFIG_PACKAGE_$package"} and ($config ne 'n')) {
+#                 $kconfig{$config} = 'm';
+#         }
+#     只要 CONFIG_PACKAGE_kmod-crypto-ghash=y（本仓库 config/wf2-73.config 里就是 y），
+#     它就会往 .config.override 里塞 CONFIG_CRYPTO_GHASH=m / CONFIG_CRYPTO_GHASH_ARM_CE=m，
+#     include/kernel.mk 的可用性判断
+#         ifneq ($(if <plain syms>,$(filter m y,$($(sym))),.),)
+#     看到 =m 就判定"可用"，于是照样跑 install recipe，按 FILES 找 .ko：
+#         ERROR: module '.../crypto/ghash-generic.ko' is missing.
+#     所以必须把这个包的 FILES/AUTOLOAD 显式清空 —— 7.3 里它本来就不该产出任何模块。
+sub('crypto-ghash FILES (crypto/ghash-generic.c removed in 7.3)',
+    r'(?m)^  FILES:=\$\(LINUX_DIR\)/crypto/ghash-generic\.ko\n',
+    '  # 7.3: crypto/ghash-generic.c 已删除（GHASH 由 lib/crypto/libgf128hash.ko\n'
+    '  # 提供，随 kmod-crypto-gcm 一起安装）。这里必须留空，否则 install recipe\n'
+    '  # 会因为找不到该 .ko 而 "ERROR: module ... is missing."\n'
+    '  FILES:=\n')
+
+sub('crypto-ghash AUTOLOAD',
+    r'(?m)^  AUTOLOAD:=\$\(call AutoLoad,09,ghash-generic\)\n',
+    '  AUTOLOAD:=\n')
+
+
 if failures:
     sys.stderr.write('::error::7.3 crypto.mk patch did not match: %s\n' % ', '.join(failures))
     sys.exit(1)
