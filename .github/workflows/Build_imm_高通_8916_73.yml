@@ -346,42 +346,40 @@ jobs:
           echo "----- 失败的包汇总（本轮全部，而不是只看到第一个）-----"
           grep -oE "ERROR: [^ ]+ failed to build" build.log | sed 's/^ERROR: //' | sort -u > build_failed_pkgs.txt || true
           cat build_failed_pkgs.txt || true
-          echo "----- module is missing 汇总 -----"
+          echo "----- module is missing / kmod 不可用 汇总 -----"
           grep -oE "ERROR: module '[^']+' is missing" build.log | sort -u >> build_failed_pkgs.txt || true
-          echo "----- kmod 在内核配置里不可用（7.3 常见）-----"
           grep -oE "WARNING: kmod-[^ ]+ is not available in the kernel config" build.log | sort -u >> build_failed_pkgs.txt || true
           echo "::endgroup::"
 
-          echo "::group::🔁 逐个复现失败包（make -j1 V=s，完整错误可见）"
+          # 复现必须从顶层调用 `make <pkg>/compile`。
+          # `make -C <pkg> compile` 会因为 TOPDIR/SCRIPT_DIR 为空而立刻失败
+          # （/bin/sh: 1: /kconfig.pl: not found），什么都诊断不出来。
+          echo "::group::🔁 复现失败包（顶层调用 make -j1 V=s <pkg>/compile）"
           REPRO_ERR=0
-          if [ -s build_failed_pkgs.txt ]; then
-            for p in $( { grep -oE '^[^ ]+ failed to build' build_failed_pkgs.txt | awk '{print $1}'; echo package/kernel/linux; } | sort -u); do
-        slug=$(echo "$p" | tr '/' '_')
-        echo "########## 复现 $p ##########"
-        make -j1 V=s -C "$p" compile > "repro_${slug}.log" 2>&1 || true
-        echo "----- $p 复现日志（最后 400 行）-----"
-        tail -n 400 "repro_${slug}.log" || true
-        if grep -qiE "error|missing|No such file" "repro_${slug}.log"; then REPRO_ERR=1; fi
-            done
-          else
-            echo "⚠️ 没有解析出失败包名，直接复现 package/kernel/linux"
-            make -j1 V=s -C package/kernel/linux compile > repro_package_kernel_linux.log 2>&1 || true
-            tail -n 400 repro_package_kernel_linux.log || true
-            if grep -qiE "error|missing|No such file" repro_package_kernel_linux.log; then REPRO_ERR=1; fi
-          fi
+          PKGS=$( { grep -oE '^[^ ]+ failed to build' build_failed_pkgs.txt | awk '{print $1}'; echo package/kernel/linux; } | sort -u )
+          echo "待复现：$PKGS"
+          for p in $PKGS; do
+            slug=$(echo "$p" | tr '/' '_')
+            echo "########## 复现 $p ##########"
+            make -j1 V=s "$p/compile" > "repro_${slug}.log" 2>&1 || true
+            echo "----- $p 复现日志（最后 500 行）-----"
+            tail -n 500 "repro_${slug}.log" || true
+            if grep -qE "Error [0-9]|ERROR:|error:|failed to build|is missing|No rule to make target" "repro_${slug}.log"; then REPRO_ERR=1; fi
+          done
           echo "::endgroup::"
 
           if [ "$REPRO_ERR" -eq 0 ]; then
-            echo "::group::⚠️ 复现未报错 —— 退化为全量详细模式重试"
+            echo "::group::⚠️ 单包复现没报错 —— 全量 V=s 重试（输出写文件，只打印尾部）"
             set +e
-            make -j8 V=s -k 2>&1 | tee build_verbose.log
+            make -j$(nproc) V=s -k > build_verbose.log 2>&1
             set -e
-            grep -nE "Error [0-9]|error:|ERROR:|\*\*\*|No rule to make target|is missing|undefined reference|No such file" build_verbose.log | tail -n 2000 > build_errors.txt || true
+            grep -nE "Error [0-9]|error:|ERROR:|\*\*\*|No rule to make target|is missing|undefined reference|No such file" build_verbose.log | tail -n 3000 > build_errors.txt || true
             tail -n 3000 build_verbose.log > build_tail.txt || true
+            cat build_errors.txt || true
             echo "::endgroup::"
           fi
 
-          echo "::error::编译失败 —— 看上面的日志，或下载 build-log 工件里的 repro_*.log"
+          echo "::error::编译失败 —— 见上面的日志，或下载 build-log 工件里的 repro_*.log / build_errors.txt"
           exit 1
         fi
 
