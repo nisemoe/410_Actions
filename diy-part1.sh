@@ -377,6 +377,103 @@ else
 	echo "ℹ️ 非 7.3 构建（ALL_DEVICES='${ALL_DEVICES:-}'），跳过 lib/crypto 依赖修正"
 fi
 
+# 4h) Linux 7.3 的 lib/crypto 拆分还会波及**非 crypto.mk 的消费者**：
+#     drivers/net/ppp/ppp_mppe.c 用 arc4_setkey/arc4_crypt，7.3 里这些符号由
+#     lib/crypto/libarc4.ko 导出。round-13 实测内核 .config 确认：
+#         CONFIG_CRYPTO_ARC4=m -> CONFIG_CRYPTO_LIB_ARC4=m   (其它 CRYPTO_LIB_* 都是 =y)
+#     而 kmod-mppe 的 DEPENDS 只有 kmod-ppp +kmod-crypto-sha1，没人把 libarc4.ko
+#     装进同一个 ipkg，于是 package-pack.mk 的 CheckDependencies 报：
+#         Package kmod-mppe is missing dependencies for the following libraries:
+#         libarc4.ko
+#         make[2]: *** [modules/netsupport.mk:707: .../kmod-mppe-7.3_rc5-r1.apk] Error 1
+#     双保险（任一生效即可）：
+#       [1] DEPENDS 加 +kmod-crypto-arc4 —— kmod-crypto-arc4 的 .provides 里有 libarc4.ko，
+#           package-pack.mk 会把 IDEPEND 的 provides 并进来，依赖即满足。
+#       [2] FILES 里再挂一份带守卫的 lib/crypto/libarc4.ko —— 万一
+#           kmod-crypto-arc4 变成空包（unavailable），自己装也照样能过。
+#           守卫保证：=m 才加（文件存在），=y 编进 vmlinux 则不加
+#           （否则 "ERROR: module ... is missing."）。
+#     rootfs 安装是纯 CP（不做依赖解析/冲突检测），同一份 .ko
+#     被两个包装进 /lib/modules/<ver>/ 不会报错。
+if [ -n "$IS73" ]; then
+	NM=package/kernel/linux/modules/netsupport.mk
+	if [ -f "$NM" ]; then
+		python3 - "$NM" <<'PY_MPPE73'
+import io
+import re
+import sys
+
+path = sys.argv[1]
+src = io.open(path, encoding='utf-8', errors='surrogateescape', newline='\n').read()
+original = src
+failures = []
+
+LIBARC4 = '$(if $(filter m,$(CONFIG_CRYPTO_LIB_ARC4)),$(LINUX_DIR)/lib/crypto/libarc4.ko)'
+
+m = re.search(r'(?ms)^define KernelPackage/mppe\n.*?^endef$', src)
+if not m:
+    failures.append('KernelPackage/mppe block not found')
+    blk = None
+else:
+    blk = m.group(0)
+    new = blk
+
+    # [1] DEPENDS: make sure +kmod-crypto-arc4 is there
+    if '+kmod-crypto-arc4' not in new:
+        def _dep(mo):
+            line = mo.group(0)
+            if '+kmod-crypto-arc4' in line:
+                return line
+            if line.endswith(' '):
+                return line + '+kmod-crypto-arc4'
+            return line + ' +kmod-crypto-arc4'
+
+        new, n = re.subn(r'(?m)^  DEPENDS:=.*$', _dep, new, count=1)
+        if not n:
+            # no DEPENDS line at all -> insert one right after the TITLE line
+            new, n = re.subn(r'(?m)^  TITLE:=.*$', lambda mo: mo.group(0)
+                             + '\n  DEPENDS:=+kmod-crypto-arc4', new, count=1)
+            if not n:
+                failures.append('mppe DEPENDS')
+
+    # [2] FILES: append the guarded libarc4.ko
+    if LIBARC4 not in new:
+        def _files(mo):
+            line = mo.group(0)
+            if LIBARC4 in line:
+                return line
+            return line + ' ' + LIBARC4
+
+        new, n = re.subn(r'(?m)^  FILES:=.*$', _files, new, count=1)
+        if not n:
+            new, n = re.subn(r'(?m)^  TITLE:=.*$', lambda mo: mo.group(0)
+                             + '\n  FILES:=' + LIBARC4, new, count=1)
+            if not n:
+                failures.append('mppe FILES')
+
+    src = src[:m.start()] + new + src[m.end():]
+
+if failures:
+    sys.stderr.write('::error::7.3 netsupport.mk mppe patch did not match: %s\n'
+                     % ', '.join(failures))
+    sys.exit(1)
+
+if src == original:
+    sys.stderr.write('::error::7.3 netsupport.mk mppe patch produced no change\n')
+    sys.exit(1)
+
+io.open(path, 'w', encoding='utf-8', errors='surrogateescape', newline='\n').write(src)
+print('OK: patched %s' % path)
+PY_MPPE73
+		echo "✅ 已按 Linux 7.3 修复 kmod-mppe 对 libarc4.ko 的依赖："
+		grep -nE "kmod-crypto-arc4|ppp_mppe\.ko|lib/crypto/libarc4" "$NM" | head -20 || true
+	else
+		echo "::warning::找不到 $NM —— 7.3 kmod-mppe/libarc4 依赖修正未执行"
+	fi
+else
+	echo "ℹ️ 非 7.3 构建（ALL_DEVICES='${ALL_DEVICES:-}'），跳过 kmod-mppe/libarc4 修正"
+fi
+
 # 5) 兜底：万一文件是 Windows 编辑器上传带上的 CRLF，make/patch 都会出问题，统一清掉行尾 \r
 for f in target/linux/generic/kernel-7.3 \
 	target/linux/generic/config-7.3 \
