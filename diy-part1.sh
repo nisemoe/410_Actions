@@ -180,6 +180,40 @@ else
 	echo "ℹ️ 非 7.3 构建（ALL_DEVICES='${ALL_DEVICES:-}'），跳过 crypto 模块改名修正"
 fi
 
+# 4e) Linux 7.3 又把 raid6 / xor 搬了家（lib/raid6 -> lib/raid/raid6，crypto/xor.o -> lib/raid/xor/xor.o）：
+#       lib/raid6/raid6_pq.ko       -> lib/raid/raid6/raid6_pq.ko
+#       crypto/xor.ko               -> lib/raid/xor/xor.ko
+#       arch/<arch>/lib/xor-neon.ko -> 7.3 起并进 xor.ko，不再是独立模块
+#                                      （lib.mk 里那个 wildcard 判断会自动走 else 分支，无需改）
+#     v7.3-rc5 证据：
+#       lib/Makefile            : obj-y += math/ crc/ crypto/ tests/ vdso/ raid/
+#       lib/raid/Makefile       : obj-y += xor/ raid6/
+#       lib/raid/raid6/Makefile : obj-$(CONFIG_RAID6_PQ)   += raid6_pq.o
+#       lib/raid/xor/Makefile   : obj-$(CONFIG_XOR_BLOCKS) += xor.o
+#     关键：CONFIG_RAID6_PQ / CONFIG_XOR_BLOCKS 在 7.3 里**依然存在**（lib/raid/Kconfig，tristate），
+#     而 config-7.3 是从 config-6.18 复制来的、这两个都是 =m。于是 include/kernel.mk 的可用性判断
+#         ifneq ($(if <plain KCONFIG syms>, $(filter m y, ...), .),)
+#     得到 B="m" -> 判定 kmod "可用" -> 走安装分支，按旧路径找不到 .ko：
+#         ERROR: module '/.../linux-7.3-rc5/lib/raid6/raid6_pq.ko' is missing.
+#     于是整个 package/kernel/linux 编译失败。又因为 include/verbose.mk 在非 V=s 时把子 make 的
+#     stdout+stderr 全部丢进 /dev/null，日志里只剩一行 "ERROR: package/kernel/linux failed to build."。
+#     只在 7.3 构建时改 —— 其它工作流还是 6.x，6.x 的路径是 lib/raid6、crypto/xor.ko，不能动。
+LM=package/kernel/linux/modules/lib.mk
+if [ -n "$IS73" ]; then
+	if [ -f "$LM" ]; then
+		sed -i \
+			-e 's#lib/raid6/raid6_pq\.ko#lib/raid/raid6/raid6_pq.ko#g' \
+			-e 's#crypto/xor\.ko#lib/raid/xor/xor.ko#g' \
+			"$LM"
+		echo "✅ 已按 Linux 7.3 的 raid6/xor 新路径修正 $LM："
+		grep -nE "raid6_pq\.ko|xor\.ko|xor-neon\.ko" "$LM" | head -20
+	else
+		echo "::warning::找不到 $LM —— 7.3 raid6/xor 路径修正未执行"
+	fi
+else
+	echo "ℹ️ 非 7.3 构建（ALL_DEVICES='${ALL_DEVICES:-}'），跳过 raid6/xor 路径修正"
+fi
+
 # 5) 兜底：万一文件是 Windows 编辑器上传带上的 CRLF，make/patch 都会出问题，统一清掉行尾 \r
 for f in target/linux/generic/kernel-7.3 \
 	target/linux/generic/config-7.3 \
