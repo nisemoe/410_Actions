@@ -735,6 +735,70 @@ PY_MAC73
 	fi
 fi
 
+# 4m) libarc4.ko 的"双重归属" —— 安装期 apk 冲突：
+#       ERROR: kmod-mac80211-7.3.7.2-r5: trying to overwrite
+#              lib/modules/7.3-rc5/libarc4.ko owned by kmod-mppe-7.3_rc5-r1.
+#     r17 已经把**所有包都编译出来了**（build_failed_pkgs.txt 为空），
+#     这是 package/install 阶段才暴露的问题：kmod-mppe（4h）和
+#     kmod-mac80211（4l）都通过
+#         $(if $(filter m,$(CONFIG_CRYPTO_LIB_ARC4)),$(LINUX_DIR)/lib/crypto/libarc4.ko)
+#     把同一个 lib/crypto/libarc4.ko 塞进了各自的 FILES，而 apk 不允许两个包拥有同一文件。
+#
+#     正确架构：libarc4.ko 应由**库的归属包** kmod-crypto-arc4 唯一提供，
+#     其它包只声明依赖（+kmod-crypto-arc4），靠 IDEPEND -> provides 通过依赖检查。
+#     因此这里做三件事：
+#       1) crypto.mk 里 kmod-crypto-arc4 的 libarc4.ko 条目**去掉守卫**（无条件提供）；
+#       2) netsupport.mk 里 kmod-mppe 的 FILES 去掉 libarc4.ko；
+#       3) mac80211/Makefile 里 kmod-mac80211 的 FILES 同样去掉。
+#     （2)(3) 的 DEPENDS 里已经有 +kmod-crypto-arc4，所以依赖检查照旧通过。
+#     这样无论扫描期 $(CONFIG_CRYPTO_LIB_ARC4) 是否可见，都只有一个包拥有该文件；
+#     而 kmod-crypto-arc4 的 provides 里一定含 libarc4.ko（字符串写死，不受守卫影响）。
+if [ -n "$IS73" ]; then
+	python3 - <<'PY_ARC4_OWNER'
+import io
+import os
+
+GUARD = '$(if $(filter m,$(CONFIG_CRYPTO_LIB_ARC4)),$(LINUX_DIR)/lib/crypto/libarc4.ko)'
+UNCOND = '$(LINUX_DIR)/lib/crypto/libarc4.ko'
+
+
+def rd(p):
+    return io.open(p, encoding='utf-8', errors='surrogateescape', newline='\n').read()
+
+
+def wr(p, s):
+    io.open(p, 'w', encoding='utf-8', errors='surrogateescape', newline='\n').write(s)
+
+
+# 1) kmod-crypto-arc4 成为 libarc4.ko 的唯一（无条件）提供者
+cm = 'package/kernel/linux/modules/crypto.mk'
+if os.path.isfile(cm):
+    s = rd(cm)
+    n = s.count(GUARD)
+    if n == 1:
+        wr(cm, s.replace(GUARD, UNCOND))
+        print('[4m] crypto.mk: kmod-crypto-arc4 改为无条件提供 libarc4.ko')
+    else:
+        print('::warning::[4m] crypto.mk guard count = %d (expect 1)' % n)
+else:
+    print('::warning::[4m] %s not found' % cm)
+
+# 2)+3) 消费者不再自带 libarc4.ko，只保留 +kmod-crypto-arc4 依赖
+for path in ('package/kernel/linux/modules/netsupport.mk',
+             'package/kernel/mac80211/Makefile'):
+    if not os.path.isfile(path):
+        print('::warning::[4m] %s not found' % path)
+        continue
+    s = rd(path)
+    n = s.count(' ' + GUARD)
+    if n == 1:
+        wr(path, s.replace(' ' + GUARD, ''))
+        print('[4m] %s: 移除自带 libarc4.ko（改由 kmod-crypto-arc4 提供）' % path)
+    else:
+        print('::warning::[4m] %s guard count = %d (expect 1)' % (path, n))
+PY_ARC4_OWNER
+fi
+
 # 5) 兜底：万一文件是 Windows 编辑器上传带上的 CRLF，make/patch 都会出问题，统一清掉行尾 \r
 for f in target/linux/generic/kernel-7.3 \
 	target/linux/generic/config-7.3 \
