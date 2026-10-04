@@ -474,6 +474,127 @@ else
 	echo "ℹ️ 非 7.3 构建（ALL_DEVICES='${ALL_DEVICES:-}'），跳过 kmod-mppe/libarc4 修正"
 fi
 
+# 4i) Linux 7.3 与 backports-7.2（mac80211 包）的冲突：
+#     struct net_device 的 ieee80211_ptr 成员在 7.3 里被
+#         #if IS_ENABLED(CONFIG_CFG80211)
+#     包着（include/linux/netdevice.h:2377）。而 OpenWrt 的 kmod-cfg80211
+#     是**不带 KCONFIG 的** KernelPackage（FILES 全部来自 $(PKG_BUILD_DIR)，
+#     即 backports 自己的产物），所以内核 .config 里根本没有
+#     CONFIG_CFG80211 -> 该成员不存在。backports-7.2 的
+#     include/net/cfg80211.h 里有
+#         cfg80211_unregister_netdevice() { cfg80211_unregister_wdev(dev->ieee80211_ptr); }
+#     于是 wcn36xx/main.c 直接编译失败：
+#         include/net/cfg80211.h:10122:37: error: 'struct net_device' has no member named 'ieee80211_ptr'
+#     修法（最直接、零副作用）：用平台补丁把这个 #if 去掉，
+#     让 ieee80211_ptr 无条件存在。struct wireless_dev 在 netdevice.h:71
+#     已有无条件前向声明，去掉 #if 即可编译；只多 8 字节/netdev，
+#     对内核其它代码是纯加成员，无影响。
+if [ -n "$IS73" ]; then
+	PD=target/linux/msm89xx/patches-7.3
+	mkdir -p "$PD"
+	cat > "$PD/994-netdevice-ieee80211-ptr-unconditional.patch" <<'NETDEV73_EOF'
+--- a/include/linux/netdevice.h
++++ b/include/linux/netdevice.h
+@@ -2374,9 +2374,7 @@
+ #if IS_ENABLED(CONFIG_TIPC)
+ 	struct tipc_bearer __rcu *tipc_ptr;
+ #endif
+-#if IS_ENABLED(CONFIG_CFG80211)
+ 	struct wireless_dev	*ieee80211_ptr;
+-#endif
+ #if IS_ENABLED(CONFIG_IEEE802154) || IS_ENABLED(CONFIG_6LOWPAN)
+ 	struct wpan_dev		*ieee802154_ptr;
+ #endif
+NETDEV73_EOF
+	cat > "$PD/993-string-strncpy-shim.patch" <<'STRING73_EOF'
+--- a/include/linux/string.h
++++ b/include/linux/string.h
+@@ -256,6 +256,27 @@
+ #ifndef __HAVE_ARCH_MEMCPY
+ extern void * memcpy(void *,const void *,__kernel_size_t);
+ #endif
++
++/*
++ * Linux 7.3 removed strncpy() from lib/string.c (and with it the declaration
++ * that used to live here).  Out-of-tree modules which still call it fail with
++ * "implicit declaration of function 'strncpy'".  Provide a behaviour-identical
++ * inline replacement (byte-for-byte the pre-7.3 kernel implementation) so such
++ * modules keep building.  'static inline' => no unused-function warning.
++ */
++static inline char *strncpy(char *dest, const char *src, __kernel_size_t count)
++{
++	char *tmp = dest;
++
++	while (count) {
++		if ((*tmp = *src) != 0)
++			src++;
++		tmp++;
++		count--;
++	}
++	return dest;
++}
++
+ #ifndef __HAVE_ARCH_MEMMOVE
+ extern void * memmove(void *,const void *,__kernel_size_t);
+ #endif
+STRING73_EOF
+	echo "✅ 已写入 7.3 兼容补丁（$PD）："
+	ls -1 "$PD" || true
+else
+	echo "ℹ️ 非 7.3 构建（ALL_DEVICES='${ALL_DEVICES:-}'），跳过 7.3 兼容补丁"
+fi
+
+# 4j) apk 版本号：7.3-rc5 会让**自带 PKG_VERSION 的 kmod 包**的版本号变成
+#     7.3_rc5.2023.05.17~07d93b62-r3，apk-tools 直接拒绝：
+#       ERROR: info field 'version' has invalid value: package version is invalid
+#       make[2]: *** [Makefile:80: .../kmod-nft-fullcone-7.3_rc5.2023.05.17~07d93b62-r3.apk] Error 99
+#     原因：apk 的版本语法是
+#       <number>{.<number>}...[_suf<number>]...[~suf]...[-r<number>]
+#     `_rc5` 之后不能再跟 `.number`。实测：
+#       7.3_rc5-r1                      -> 合法（round-13 已构建）
+#       7.3_rc5~<vermagic>-r1           -> 合法（EXTRA_DEPENDS 里的 kernel 约束）
+#       7.3_rc5.2023.05.17~07d93b62-r3  -> 非法 ← 本轮报错点
+#     修法：包自带 PKG_VERSION 时，内核部分只取主版本（7.3），
+#     与 6.x 时代的 6.18.2023.05.17~07d93b62-r3 形状完全一致。
+#     不带 PKG_VERSION 的包（kmod-crypto-* 等）保持 7.3_rc5-r1 不变。
+#     EXTRA_DEPENDS 里的 kernel (=7.3_rc5~<vermagic>-rN) 不受影响，ABI 约束照旧。
+#     非 rc 内核（6.18 等）：$(firstword $(subst -, ,6.18)) = 6.18，与原来等价。
+if [ -n "$IS73" ]; then
+	KMK=include/kernel.mk
+	if [ -f "$KMK" ]; then
+		python3 - "$KMK" <<'PY_VER73'
+import io
+import sys
+
+path = sys.argv[1]
+src = io.open(path, encoding='utf-8', errors='surrogateescape', newline='\n').read()
+
+OLD = ('    VERSION:=$(subst -rc,_rc,$(LINUX_VERSION))'
+       '$(if $(PKG_VERSION),.$(PKG_VERSION))'
+       '-r$(if $(PKG_RELEASE),$(PKG_RELEASE),$(LINUX_RELEASE))')
+NEW = ('    VERSION:=$(if $(PKG_VERSION),$(firstword $(subst -, ,$(LINUX_VERSION))),'
+       '$(subst -rc,_rc,$(LINUX_VERSION)))'
+       '$(if $(PKG_VERSION),.$(PKG_VERSION))'
+       '-r$(if $(PKG_RELEASE),$(PKG_RELEASE),$(LINUX_RELEASE))')
+
+n = src.count(OLD)
+if n != 1:
+    sys.stderr.write('::error::kernel.mk VERSION line match count = %d\n' % n)
+    sys.exit(1)
+
+src = src.replace(OLD, NEW)
+io.open(path, 'w', encoding='utf-8', errors='surrogateescape', newline='\n').write(src)
+print('OK: patched %s' % path)
+PY_VER73
+		echo "✅ 已修正 7.3-rc5 的 apk 版本号："
+		grep -n "^    VERSION:=" "$KMK" || true
+	else
+		echo "::warning::找不到 $KMK —— apk 版本号修正未执行"
+	fi
+else
+	echo "ℹ️ 非 7.3 构建（ALL_DEVICES='${ALL_DEVICES:-}'），跳过 apk 版本号修正"
+fi
+
 # 5) 兜底：万一文件是 Windows 编辑器上传带上的 CRLF，make/patch 都会出问题，统一清掉行尾 \r
 for f in target/linux/generic/kernel-7.3 \
 	target/linux/generic/config-7.3 \
