@@ -595,6 +595,57 @@ else
 	echo "ℹ️ 非 7.3 构建（ALL_DEVICES='${ALL_DEVICES:-}'），跳过 apk 版本号修正"
 fi
 
+# 4k) Linux 7.3 又动了两个"老接口"，这正是 r15 剩下两个失败的根因：
+#     (1) include/linux/kernel.h 不再 include <linux/hex.h>（6.18 里是有的，
+#         就在 bitops.h 和 kstrtox.h 之间）。mac_pton() 的声明在
+#         include/linux/hex.h —— 7.3 并没有删掉它（6.18/7.3 的 hex.h 逐字节相同），
+#         只是不再被 kernel.h 顺带带出来。于是 backports-7.2 的
+#             net/wireless/sysfs.c:42:14: error: implicit declaration of function 'mac_pton'
+#         （package/kernel/mac80211 整棵树只报了这一条 error）
+#         修法：把 #include <linux/hex.h> 加回 kernel.h，恢复 6.18 的可见性。
+#     (2) open-app-filter（oaf 内核模块）的 oaf/src/af_client.c 只 include 了
+#         <linux/netfilter.h> 和 <linux/netfilter_ipv6.h>，没有 include
+#         <linux/netfilter_ipv4.h>，却用了 NF_IP_PRI_FIRST / NF_IP_PRI_LAST：
+#             af_client.c:541:29: error: 'NF_IP_PRI_FIRST' undeclared here
+#                                       (did you mean 'NF_IP6_PRI_FIRST'?)
+#         这两个枚举值在 7.3 里仍在（只是 6.18 用 INT_MIN/INT_MAX，
+#         7.3 改成 __KERNEL_INT_MIN/__KERNEL_INT_MAX，值不变）。
+#         注意：不能用 #define 兜底 —— 枚举常量对预处理器不可见，
+#         #ifndef 一定成立，宏会把头里的枚举名替换掉从而语法错。
+#         修法：让 netfilter_ipv6.h 顺带把 netfilter_ipv4.h 带进来。
+#         这两个头本就是孪生关系（ipv6 头的注释原文：
+#         "this header was blatantly ripped from netfilter_ipv4.h"），
+#         且 netfilter_ipv4.h 只 include netfilter.h + typelimits.h，
+#         不存在循环包含问题。
+if [ -n "$IS73" ]; then
+	PD=target/linux/msm89xx/patches-7.3
+	mkdir -p "$PD"
+	cat > "$PD/995-kernel-h-hex-include.patch" <<'HEX73_EOF'
+--- a/include/linux/kernel.h
++++ b/include/linux/kernel.h
+@@ -21,6 +21,7 @@
+ #include <linux/compiler.h>
+ #include <linux/container_of.h>
+ #include <linux/bitops.h>
++#include <linux/hex.h>
+ #include <linux/kstrtox.h>
+ #include <linux/log2.h>
+ #include <linux/math.h>
+HEX73_EOF
+	cat > "$PD/996-netfilter-ipv6-include-ipv4.patch" <<'NFIPV4_73_EOF'
+--- a/include/uapi/linux/netfilter_ipv6.h
++++ b/include/uapi/linux/netfilter_ipv6.h
+@@ -12,5 +12,6 @@
+ #include <linux/netfilter.h>
+ #include <linux/typelimits.h>
++#include <linux/netfilter_ipv4.h>
+ 
+ /* only for userspace compatibility */
+ #ifndef __KERNEL__
+NFIPV4_73_EOF
+	echo "[ok] 4k) added 995-kernel-h-hex-include.patch / 996-netfilter-ipv6-include-ipv4.patch into $PD"
+fi
+
 # 5) 兜底：万一文件是 Windows 编辑器上传带上的 CRLF，make/patch 都会出问题，统一清掉行尾 \r
 for f in target/linux/generic/kernel-7.3 \
 	target/linux/generic/config-7.3 \
