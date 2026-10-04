@@ -646,6 +646,95 @@ NFIPV4_73_EOF
 	echo "[ok] 4k) added 995-kernel-h-hex-include.patch / 996-netfilter-ipv6-include-ipv4.patch into $PD"
 fi
 
+# 4l) 和 4h) 同一类问题：Linux 7.3 把 lib/crypto 拆成独立模块后，
+#     backports 的 mac80211.ko 链接到了 arc4 符号（WEP/TKIP），
+#     打包时依赖检查直接拒绝：
+#       Package kmod-mac80211 is missing dependencies for the following libraries:
+#       libarc4.ko
+#       make[2]: *** [Makefile:410: .../kmod-mac80211-7.3.7.2-r4.apk] Error 1
+#     （注意：此时 backports 整棵树**已经编译成功**了 —— wcn36xx/ath/rtw88 全家的 .ko
+#       都产出了，只剩这一个包在 apk 打包阶段被依赖检查拦下，不是编译错误。）
+#
+#     ★ 为什么用 +kmod-crypto-arc4 而不是只靠 FILES 里的 $(if ...)：
+#       include/kernel.mk 第 192-194 行是
+#           ifeq ($(DUMP)$(TARGET_BUILD),)
+#             -include $(LINUX_DIR)/.config
+#           endif
+#       而元数据扫描（include/scan.mk）是带 DUMP=1 跑的，**扫描期根本不会 include
+#       内核 .config**，所以扫描期 $(CONFIG_CRYPTO_LIB_ARC4) 是空的，
+#       $(if $(filter m,...)) 一律为假 —— 只有 FILES 守卫是不够的。
+#       4h) 里 kmod-mppe 能修好，靠的正是同时加的 `+kmod-crypto-arc4`
+#       （DEPENDS -> IDEPEND -> kmod-crypto-arc4.provides 里含 libarc4.ko）。
+#       这里对 kmod-mac80211 采用**完全相同的一对改动**。
+#
+#     已从 r16 的 step log 里取到权威内核配置，两个符号都确实为 m：
+#       CONFIG_CRYPTO_LIB_ARC4=m
+#       CONFIG_CRYPTO_ARC4=m        <- 所以 kmod-crypto-arc4 是真实非空包
+#     FILES 里的守卫保留作第二层保险（构建期 DUMP 为空时它会生效）。
+if [ -n "$IS73" ]; then
+	MKM=package/kernel/mac80211/Makefile
+	if [ -f "$MKM" ]; then
+		python3 - "$MKM" <<'PY_MAC73'
+import io
+import re
+import sys
+
+path = sys.argv[1]
+src = io.open(path, encoding='utf-8', errors='surrogateescape', newline='\n').read()
+
+# locate the *exact* "define KernelPackage/mac80211" block (not /Default, /config, ...)
+m = re.search(r'(?m)^define KernelPackage/mac80211\n(.*?)^endef\n', src, re.S)
+if not m:
+    sys.stderr.write('::error::mac80211: KernelPackage/mac80211 block not found\n')
+    sys.exit(1)
+
+blk = m.group(1)
+orig = blk
+
+GUARD = ' $(if $(filter m,$(CONFIG_CRYPTO_LIB_ARC4)),$(LINUX_DIR)/lib/crypto/libarc4.ko)'
+
+# --- 1) DEPENDS += +kmod-crypto-arc4   (this is the part that actually fixes the check)
+if '+kmod-crypto-arc4' not in blk:
+    dm = re.search(r'(?m)^([ \t]*DEPENDS\+=.*)$', blk)
+    if not dm:
+        sys.stderr.write('::error::mac80211: DEPENDS+= line not found in KernelPackage/mac80211\n')
+        sys.exit(1)
+    old_dep = dm.group(1)
+    new_dep = old_dep.rstrip() + ' +kmod-crypto-arc4'
+    blk = blk.replace(old_dep, new_dep, 1)
+    print('  DEPENDS: ' + old_dep)
+    print('        -> ' + new_dep)
+else:
+    print('  DEPENDS: +kmod-crypto-arc4 already present, skipped')
+
+# --- 2) FILES += guarded libarc4.ko   (second line of defence)
+if 'libarc4.ko' not in blk:
+    fm = re.search(r'(?m)^([ \t]*FILES:=[ \t]*\$\(PKG_BUILD_DIR\)/net/mac80211/mac80211\.ko[ \t]*)$', blk)
+    if not fm:
+        sys.stderr.write('::error::mac80211: FILES:= $(PKG_BUILD_DIR)/net/mac80211/mac80211.ko not found\n')
+        sys.exit(1)
+    old_files = fm.group(1)
+    new_files = old_files.rstrip() + GUARD
+    blk = blk.replace(old_files, new_files, 1)
+    print('  FILES:   ' + old_files)
+    print('        -> ' + new_files)
+else:
+    print('  FILES: libarc4.ko already present, skipped')
+
+if blk == orig:
+    sys.stderr.write('::error::mac80211: nothing changed\n')
+    sys.exit(1)
+
+src = src[:m.start(1)] + blk + src[m.end(1):]
+io.open(path, 'w', encoding='utf-8', errors='surrogateescape', newline='\n').write(src)
+print('OK: patched %s' % path)
+PY_MAC73
+		echo "[ok] 已给 kmod-mac80211 补上 libarc4.ko 依赖（+kmod-crypto-arc4 + FILES 守卫）"
+	else
+		echo "::warning::package/kernel/mac80211/Makefile 不存在，4l) 跳过"
+	fi
+fi
+
 # 5) 兜底：万一文件是 Windows 编辑器上传带上的 CRLF，make/patch 都会出问题，统一清掉行尾 \r
 for f in target/linux/generic/kernel-7.3 \
 	target/linux/generic/config-7.3 \
