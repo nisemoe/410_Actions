@@ -88,12 +88,29 @@
 	gpios = <&tlmm 31 GPIO_ACTIVE_HIGH>;
 };
 
+/*
+ * LED wiring on the ufi-wf2 board.
+ *
+ * msm8916-mifi.dtsi ships a generic fallback (green = WLAN, blue = WAN,
+ * blue off) that does NOT match this board. On the real stick the BLUE led
+ * is the WiFi indicator and it is lit as soon as the SoC is up; GREEN is
+ * the WAN/internet indicator. With the dtsi defaults the board looked dead
+ * ("wifi led never lights") even though it had booted fine, because the
+ * only led that turned on was the red power one.
+ *
+ * Verified against a known-good boot.img for this exact board: its DTB has
+ * led-b = wlan / default-state "on" and led-g = wan / default-state "off".
+ */
 &led_g {
 	gpios = <&tlmm 12 GPIO_ACTIVE_HIGH>;
+	function = LED_FUNCTION_WAN;
+	default-state = "off";
 };
 
 &led_b {
 	gpios = <&tlmm 22 GPIO_ACTIVE_HIGH>;
+	function = LED_FUNCTION_WLAN;
+	default-state = "on";
 };
 
 &button_default {
