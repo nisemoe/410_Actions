@@ -27,9 +27,15 @@ endef
 define Device/Default
 	PROFILES := Default
 	KERNEL = kernel-bin | gzip | append-dtb | aboot-img
-	IMAGES := boot.img system.img sysupgrade.bin
-	IMAGE/boot.img := append-kernel | append-metadata
-	IMAGE/system.img := append-rootfs | append-metadata
+	IMAGES := boot.img system.img rootfs.img sysupgrade.bin
+	# NO append-metadata here: the JSON trailer makes the image size a
+	# non-multiple of 4096, which breaks "fastboot -S <n> flash" (it
+	# sparsifies the raw image on the fly and rejects the partial block).
+	IMAGE/boot.img := append-kernel
+	IMAGE/system.img := append-rootfs
+	# rootfs.img is the Android sparse variant - same format as the
+	# reference firmware, drop-in for "fastboot -S 200m flash rootfs".
+	IMAGE/rootfs.img := append-rootfs | sparse-img
 	IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
 	DEVICE_DTS_DIR := $(DTS_DIR)/qcom
 	DEVICE_DTS = $$(SOC)-$(lastword $(subst _, ,$(1)))
